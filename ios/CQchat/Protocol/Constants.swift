@@ -7,12 +7,18 @@ enum CQ {
     static let ttlDefault: UInt8 = 7
     static let tempIdRotateSecs: TimeInterval = 180
     static let dedupTtlSecs: TimeInterval = 300
+    static let msgExpirySecs: TimeInterval = 600
+    static let maxRetries = 5
+    static let ackRetrySecs: TimeInterval = 2.5
     static let tcpPort: UInt16 = 37251
     static let mdnsType = "_cqchat._tcp."
     static let mediaBleMax = 102_400
     static let imageMaxEdge: CGFloat = 1280
     static let imageJpegQuality: CGFloat = 0.7
     static let nearbyNotifyCooldown: TimeInterval = 600
+    static let favoriteNotifyCooldown: TimeInterval = 600
+    /// Peer marked unreachable if no BLE discovery / RX for this long.
+    static let peerUnreachableSecs: TimeInterval = 60
 
     static let serviceUUID = CBUUID(string: "C1C10001-C1C1-4000-8000-00000000C1C1")
     static let inboxUUID = CBUUID(string: "C1C10002-C1C1-4000-8000-00000000C1C1")

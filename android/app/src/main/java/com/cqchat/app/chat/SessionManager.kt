@@ -1,5 +1,6 @@
 package com.cqchat.app.chat
 
+import com.cqchat.app.protocol.IdentityCrypto
 import com.cqchat.app.protocol.NoiseXX
 import com.cqchat.app.protocol.hexToBytes
 import com.cqchat.app.protocol.toHex
@@ -9,10 +10,13 @@ class SessionManager(private val staticPrivate: ByteArray) {
         val noise: NoiseXX,
         var remoteTempId: ByteArray,
         var nickname: String,
+        var identityFingerprint: ByteArray? = null,
+        var failed: Boolean = false,
     )
 
-    private val byFingerprint = HashMap<String, Session>()
+    private val byKey = HashMap<String, Session>()
     private val handshakeByTemp = HashMap<String, NoiseXX>()
+    private val tempToKey = HashMap<String, String>()
 
     @Synchronized
     fun begin(role: NoiseXX.Role, tempId: ByteArray): NoiseXX {
@@ -29,31 +33,70 @@ class SessionManager(private val staticPrivate: ByteArray) {
         val n = handshakeByTemp.remove(tempId.toHex()) ?: return
         if (!n.completed) return
         val sid = n.remoteSessionId ?: return
-        byFingerprint[sid.toHex()] = Session(n, tempId, nickname)
+        val s = Session(n, tempId, nickname)
+        byKey[sid.toHex()] = s
+        tempToKey[tempId.toHex()] = sid.toHex()
     }
 
     @Synchronized
-    fun rebind(fromSessionId: ByteArray, toIdentityFingerprint: ByteArray) {
-        val s = byFingerprint.remove(fromSessionId.toHex()) ?: return
-        byFingerprint[toIdentityFingerprint.toHex()] = s
+    fun rebind(fromSessionId: ByteArray, toIdentityFingerprint: ByteArray): Session? {
+        val sid = fromSessionId.toHex()
+        val fp = toIdentityFingerprint.toHex()
+        val s = byKey[sid] ?: byKey[fp] ?: return null
+        s.identityFingerprint = toIdentityFingerprint
+        byKey[fp] = s
+        byKey[sid] = s
+        tempToKey.entries.find { it.value == sid }?.let { it.setValue(fp) }
+        return s
     }
 
     @Synchronized
-    fun session(fp: ByteArray): Session? = byFingerprint[fp.toHex()]
-
-    @Synchronized
-    fun all(): List<Pair<ByteArray, Session>> =
-        byFingerprint.map { (it.key.hexToBytes() ?: ByteArray(0)) to it.value }
-
-    @Synchronized
-    fun fingerprintForTemp(tempId: ByteArray): ByteArray? {
-        val e = byFingerprint.entries.firstOrNull { it.value.remoteTempId.contentEquals(tempId) }
-            ?: return null
-        return e.key.hexToBytes()
+    fun bindTempId(tempId: ByteArray, key: ByteArray) {
+        tempToKey[tempId.toHex()] = key.toHex()
+        byKey[key.toHex()]?.remoteTempId = tempId
     }
 
     @Synchronized
-    fun updateNickname(fp: ByteArray, name: String) {
-        byFingerprint[fp.toHex()]?.nickname = name
+    fun session(key: ByteArray): Session? = byKey[key.toHex()]
+
+    @Synchronized
+    fun all(): List<Pair<ByteArray, Session>> {
+        val seen = HashSet<NoiseXX>()
+        val out = ArrayList<Pair<ByteArray, Session>>()
+        for ((k, s) in byKey) {
+            if (!seen.add(s.noise)) continue
+            val id = s.identityFingerprint ?: (k.hexToBytes() ?: continue)
+            out.add(id to s)
+        }
+        return out
+    }
+
+    @Synchronized
+    fun keyForTemp(tempId: ByteArray): ByteArray? =
+        tempToKey[tempId.toHex()]?.hexToBytes()
+
+    @Synchronized
+    fun updateNickname(key: ByteArray, name: String) {
+        byKey[key.toHex()]?.nickname = name
+    }
+
+    @Synchronized
+    fun markFailed(key: ByteArray) {
+        byKey[key.toHex()]?.failed = true
+    }
+
+    @Synchronized
+    fun remove(key: ByteArray) {
+        val s = byKey.remove(key.toHex()) ?: return
+        s.identityFingerprint?.let { byKey.remove(it.toHex()) }
+        s.noise.remoteSessionId?.let { byKey.remove(it.toHex()) }
+        tempToKey.entries.removeAll { it.value == key.toHex() }
+    }
+
+    @Synchronized
+    fun clear() {
+        byKey.clear()
+        handshakeByTemp.clear()
+        tempToKey.clear()
     }
 }

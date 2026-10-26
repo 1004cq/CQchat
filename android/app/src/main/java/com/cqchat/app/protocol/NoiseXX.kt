@@ -272,14 +272,21 @@ class CipherState(key: ByteArray) {
     fun decrypt(ciphertext: ByteArray, ad: ByteArray): ByteArray {
         require(ciphertext.size >= 16)
         val nonce = noiseNonce(n)
-        n++
         val cipher = ChaCha20Poly1305()
         cipher.init(false, AEADParameters(BCKeyParameter(key), 128, nonce, ad))
         val out = ByteArray(cipher.getOutputSize(ciphertext.size))
-        val len = cipher.processBytes(ciphertext, 0, ciphertext.size, out, 0)
-        val fin = cipher.doFinal(out, len)
-        return out.copyOf(len + fin)
+        try {
+            val len = cipher.processBytes(ciphertext, 0, ciphertext.size, out, 0)
+            val fin = cipher.doFinal(out, len)
+            n++ // only advance after successful auth
+            return out.copyOf(len + fin)
+        } catch (e: Exception) {
+            // leave n unchanged on MAC / decrypt failure
+            throw e
+        }
     }
+
+    val nonce: Long get() = n
 
     companion object {
         fun noiseNonce(n: Long): ByteArray {

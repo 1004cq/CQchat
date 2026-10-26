@@ -29,6 +29,8 @@ class LocalNotifier(private val context: Context) {
 
     fun nearby(name: String) = message("附近的人", "发现 $name")
 
+    fun favoriteNearby(name: String) = message("收藏的人出现了", name)
+
     companion object {
         const val CHANNEL = "cqchat_local"
     }

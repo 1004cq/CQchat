@@ -8,12 +8,18 @@ object CQ {
     const val TTL_DEFAULT: Int = 7
     const val TEMP_ID_ROTATE_SECS: Long = 180
     const val DEDUP_TTL_SECS: Long = 300
+    const val MSG_EXPIRY_SECS: Long = 600
+    const val MAX_RETRIES: Int = 5
+    const val ACK_RETRY_MS: Long = 2_500
     const val TCP_PORT: Int = 37251
     const val MDNS_TYPE: String = "_cqchat._tcp."
     const val MEDIA_BLE_MAX: Int = 102_400
     const val IMAGE_MAX_EDGE: Int = 1280
     const val IMAGE_JPEG_QUALITY: Int = 70
     const val NEARBY_NOTIFY_COOLDOWN_MS: Long = 600_000
+    const val FAVORITE_NOTIFY_COOLDOWN_MS: Long = 600_000
+    /** Peer marked unreachable if no BLE discovery / RX for this long. */
+    const val PEER_UNREACHABLE_MS: Long = 60_000
     const val HEADER_SIZE: Int = 38
     const val QR_PREFIX: String = "cqchat:v1:"
 

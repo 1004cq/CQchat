@@ -7,6 +7,7 @@ enum IdentityKeys {
     private static let seedAccount = "identity_seed_v1"
     private static let verifiedKey = "cqchat.verified.fingerprints"
     private static let nicknameKey = "cqchat.nickname"
+    private static let favoritesKey = "cqchat.favorites.fingerprints"
 
     static func loadOrCreate() throws -> (seed: Data, x25519: Curve25519.KeyAgreement.PrivateKey, ed25519: Curve25519.Signing.PrivateKey) {
         let seed: Data
@@ -65,8 +66,43 @@ enum IdentityKeys {
         UserDefaults.standard.set(Array(set), forKey: verifiedKey)
     }
 
+    static func isFavorite(fingerprint: Data) -> Bool {
+        favoriteSet().contains(fingerprint.hex)
+    }
+
+    static func setFavorite(_ on: Bool, fingerprint: Data) {
+        var set = favoriteSet()
+        if on { set.insert(fingerprint.hex) } else { set.remove(fingerprint.hex) }
+        UserDefaults.standard.set(Array(set), forKey: favoritesKey)
+    }
+
+    static func favoriteFingerprints() -> Set<String> { favoriteSet() }
+
+    /// Delete identity_seed from Keychain and wipe local prefs (verified / favorites / nickname).
+    static func wipeIdentityStorage() throws {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: seedService,
+            kSecAttrAccount as String: seedAccount,
+        ]
+        SecItemDelete(q as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: verifiedKey)
+        UserDefaults.standard.removeObject(forKey: favoritesKey)
+        UserDefaults.standard.removeObject(forKey: nicknameKey)
+    }
+
+    /// Wipe then mint a fresh identity_seed.
+    static func wipeAndRegenerate() throws -> (seed: Data, x25519: Curve25519.KeyAgreement.PrivateKey, ed25519: Curve25519.Signing.PrivateKey) {
+        try wipeIdentityStorage()
+        return try loadOrCreate()
+    }
+
     private static func verifiedSet() -> Set<String> {
         Set(UserDefaults.standard.stringArray(forKey: verifiedKey) ?? [])
+    }
+
+    private static func favoriteSet() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: favoritesKey) ?? [])
     }
 
     private static func keychainGet() -> Data? {

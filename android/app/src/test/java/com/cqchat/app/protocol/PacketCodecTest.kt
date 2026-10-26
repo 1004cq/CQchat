@@ -81,6 +81,26 @@ class PacketCodecTest {
         assertArrayEquals("pong".toByteArray(), initiator.decrypt(ct2))
     }
 
+    @Test
+    fun decryptFailureDoesNotAdvanceNonce() {
+        val aStatic = NoiseXX.genX25519()
+        val bStatic = NoiseXX.genX25519()
+        val a = NoiseXX(NoiseXX.Role.INITIATOR, aStatic)
+        val b = NoiseXX(NoiseXX.Role.RESPONDER, bStatic)
+        b.responderRead1(a.initiatorWrite1())
+        a.initiatorRead2(b.responderWrite2())
+        b.responderRead3(a.initiatorWrite3())
+
+        // Failed decrypt against wrong/garbage must leave nonce unchanged
+        try {
+            b.decrypt(ByteArray(32) { 0xAB.toByte() })
+            fail("expected decrypt failure")
+        } catch (_: Exception) {
+        }
+        val ct = a.encrypt("still-ok".toByteArray())
+        assertArrayEquals("still-ok".toByteArray(), b.decrypt(ct))
+    }
+
     private fun readWorkspaceVector(): String {
         // Fallback when not on android assets classpath: load from repo path via system property or relative
         val paths = listOf(

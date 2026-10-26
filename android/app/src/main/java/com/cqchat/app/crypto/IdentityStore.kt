@@ -28,24 +28,23 @@ class IdentityStore(context: Context) {
     private val appPrefs: SharedPreferences =
         context.getSharedPreferences("cqchat_app", Context.MODE_PRIVATE)
 
-    val seed: ByteArray
-    val x25519Private: ByteArray
-    val x25519Public: ByteArray
-    val ed25519Private: ByteArray
-    val ed25519Public: ByteArray
-    val fingerprint: ByteArray
-    val fingerprintHex: String
+    var seed: ByteArray = ByteArray(0)
+        private set
+    var x25519Private: ByteArray = ByteArray(0)
+        private set
+    var x25519Public: ByteArray = ByteArray(0)
+        private set
+    var ed25519Private: ByteArray = ByteArray(0)
+        private set
+    var ed25519Public: ByteArray = ByteArray(0)
+        private set
+    var fingerprint: ByteArray = ByteArray(0)
+        private set
+    var fingerprintHex: String = ""
+        private set
 
     init {
-        seed = loadOrCreateSeed()
-        val xSeed = NoiseXX.cqHkdf(seed, ByteArray(0), "cqchat-v1-x25519".toByteArray(), 32)
-        val eSeed = NoiseXX.cqHkdf(seed, ByteArray(0), "cqchat-v1-ed25519".toByteArray(), 32)
-        x25519Private = xSeed
-        x25519Public = X25519PrivateKeyParameters(xSeed, 0).generatePublicKey().encoded
-        ed25519Private = eSeed
-        ed25519Public = Ed25519PrivateKeyParameters(eSeed, 0).generatePublicKey().encoded
-        fingerprint = IdentityCrypto.fingerprint(ed25519Public)
-        fingerprintHex = fingerprint.toHex()
+        deriveFrom(loadOrCreateSeed())
     }
 
     var nickname: String
@@ -70,8 +69,22 @@ class IdentityStore(context: Context) {
         appPrefs.edit().putStringSet("verified", set).apply()
     }
 
-    private fun verifiedSet(): Set<String> =
-        appPrefs.getStringSet("verified", emptySet()) ?: emptySet()
+    fun isFavorite(fp: ByteArray): Boolean =
+        favoriteSet().contains(fp.toHex())
+
+    fun setFavorite(on: Boolean, fp: ByteArray) {
+        val set = favoriteSet().toMutableSet()
+        if (on) set.add(fp.toHex()) else set.remove(fp.toHex())
+        appPrefs.edit().putStringSet("favorites", set).apply()
+    }
+
+    fun favoriteFingerprints(): Set<String> = favoriteSet()
+
+    /** Delete Keystore wrap + prefs, then mint a fresh identity_seed. */
+    fun wipeAndRegenerate() {
+        wipeStorage()
+        deriveFrom(loadOrCreateSeed())
+    }
 
     fun sign(message: ByteArray): ByteArray {
         val signer = Ed25519Signer()
@@ -90,6 +103,34 @@ class IdentityStore(context: Context) {
             false
         }
     }
+
+    private fun deriveFrom(seedBytes: ByteArray) {
+        seed = seedBytes
+        val xSeed = NoiseXX.cqHkdf(seed, ByteArray(0), "cqchat-v1-x25519".toByteArray(), 32)
+        val eSeed = NoiseXX.cqHkdf(seed, ByteArray(0), "cqchat-v1-ed25519".toByteArray(), 32)
+        x25519Private = xSeed
+        x25519Public = X25519PrivateKeyParameters(xSeed, 0).generatePublicKey().encoded
+        ed25519Private = eSeed
+        ed25519Public = Ed25519PrivateKeyParameters(eSeed, 0).generatePublicKey().encoded
+        fingerprint = IdentityCrypto.fingerprint(ed25519Public)
+        fingerprintHex = fingerprint.toHex()
+    }
+
+    private fun wipeStorage() {
+        prefs.edit().clear().apply()
+        appPrefs.edit().clear().apply()
+        try {
+            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (ks.containsAlias(KEY_ALIAS)) ks.deleteEntry(KEY_ALIAS)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun verifiedSet(): Set<String> =
+        appPrefs.getStringSet("verified", emptySet()) ?: emptySet()
+
+    private fun favoriteSet(): Set<String> =
+        appPrefs.getStringSet("favorites", emptySet()) ?: emptySet()
 
     private fun loadOrCreateSeed(): ByteArray {
         val wrapped = prefs.getString(PREF_WRAPPED, null)
