@@ -1,17 +1,21 @@
 import Foundation
 import CryptoKit
 
-/// One Noise session per remote fingerprint. BLE and TCP share the same CipherStates.
+/// One Noise session per remote identity. BLE and TCP share the same CipherStates.
+/// Provisional key = sessionId(X25519); after verified Hello → Ed25519 fingerprint.
 final class SessionManager {
     struct Session {
         let noise: NoiseXX
         var remoteTempId: Data
         var nickname: String
+        var identityFingerprint: Data? // Ed25519 fp once Hello verified
         var established: Date
+        var failed: Bool = false
     }
 
-    private var byFingerprint: [Data: Session] = [:]
+    private var byKey: [Data: Session] = [:] // identity fp and/or session id → session
     private var handshakeByTemp: [Data: NoiseXX] = [:]
+    private var tempToKey: [Data: Data] = [:] // current temp_id → session map key
     private let staticKey: Curve25519.KeyAgreement.PrivateKey
     private let lock = NSLock()
 
@@ -19,14 +23,23 @@ final class SessionManager {
         self.staticKey = staticKey
     }
 
-    func session(for fingerprint: Data) -> Session? {
+    func session(for key: Data) -> Session? {
         lock.lock(); defer { lock.unlock() }
-        return byFingerprint[fingerprint]
+        return byKey[key]
     }
 
     func allSessions() -> [(id: Data, session: Session)] {
         lock.lock(); defer { lock.unlock() }
-        return byFingerprint.map { ($0.key, $0.value) }
+        var seen = Set<ObjectIdentifier>()
+        var out: [(Data, Session)] = []
+        for (k, s) in byKey {
+            let oid = ObjectIdentifier(s.noise)
+            if seen.contains(oid) { continue }
+            seen.insert(oid)
+            let id = s.identityFingerprint ?? k
+            out.append((id, s))
+        }
+        return out
     }
 
     func beginHandshake(as role: NoiseXX.Role, tempId: Data) -> NoiseXX {
@@ -46,40 +59,81 @@ final class SessionManager {
         guard let n = handshakeByTemp.removeValue(forKey: tempId),
               n.completed,
               let sid = n.remoteSessionId else { return }
-        // Keyed by provisional session id until Hello binds Ed25519 fingerprint.
-        byFingerprint[sid] = Session(
-            noise: n, remoteTempId: tempId, nickname: nickname, established: Date()
+        let s = Session(
+            noise: n, remoteTempId: tempId, nickname: nickname,
+            identityFingerprint: nil, established: Date()
         )
+        byKey[sid] = s
+        tempToKey[tempId] = sid
     }
 
-    func rebind(fromSessionId sid: Data, toIdentityFingerprint fp: Data) {
+    /// Move provisional session-id key to Ed25519 identity fingerprint (alias both during transition).
+    @discardableResult
+    func rebind(fromSessionId sid: Data, toIdentityFingerprint fp: Data) -> Session? {
         lock.lock(); defer { lock.unlock() }
-        guard let s = byFingerprint.removeValue(forKey: sid) else { return }
-        byFingerprint[fp] = s
+        guard var s = byKey[sid] ?? byKey[fp] else { return nil }
+        s.identityFingerprint = fp
+        byKey[fp] = s
+        byKey[sid] = s // keep alias until temp rotates
+        if let t = tempToKey.first(where: { $0.value == sid })?.key {
+            tempToKey[t] = fp
+        }
+        return s
     }
 
-    func bindTempId(_ tempId: Data, toFingerprint fp: Data) {
+    func bindTempId(_ tempId: Data, toKey key: Data) {
         lock.lock(); defer { lock.unlock() }
-        byFingerprint[fp]?.remoteTempId = tempId
+        tempToKey[tempId] = key
+        if var s = byKey[key] {
+            s.remoteTempId = tempId
+            byKey[key] = s
+            if let fp = s.identityFingerprint { byKey[fp] = s }
+        }
     }
 
-    func updateNickname(_ name: String, fingerprint: Data) {
+    func updateNickname(_ name: String, key: Data) {
         lock.lock(); defer { lock.unlock() }
-        byFingerprint[fingerprint]?.nickname = name
+        guard var s = byKey[key] else { return }
+        s.nickname = name
+        byKey[key] = s
+        if let fp = s.identityFingerprint { byKey[fp] = s }
     }
 
-    func encrypt(to fingerprint: Data, plaintext: Data) throws -> Data {
-        guard let s = session(for: fingerprint) else { throw NoiseError.handshakeIncomplete }
+    func markFailed(_ key: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard var s = byKey[key] else { return }
+        s.failed = true
+        byKey[key] = s
+        if let fp = s.identityFingerprint { byKey[fp] = s }
+        if let sid = s.noise.remoteSessionId { byKey[sid] = s }
+    }
+
+    func remove(_ key: Data) {
+        lock.lock(); defer { lock.unlock() }
+        if let s = byKey.removeValue(forKey: key) {
+            if let fp = s.identityFingerprint { byKey.removeValue(forKey: fp) }
+            if let sid = s.noise.remoteSessionId { byKey.removeValue(forKey: sid) }
+            tempToKey = tempToKey.filter { $0.value != key && $0.value != s.identityFingerprint }
+        }
+    }
+
+    func encrypt(to key: Data, plaintext: Data) throws -> Data {
+        guard let s = session(for: key), !s.failed else { throw NoiseError.handshakeIncomplete }
         return try s.noise.encrypt(plaintext)
     }
 
-    func decrypt(from fingerprint: Data, ciphertext: Data) throws -> Data {
-        guard let s = session(for: fingerprint) else { throw NoiseError.handshakeIncomplete }
-        return try s.noise.decrypt(ciphertext)
+    func decrypt(from key: Data, ciphertext: Data) throws -> Data {
+        guard let s = session(for: key), !s.failed else { throw NoiseError.handshakeIncomplete }
+        do {
+            return try s.noise.decrypt(ciphertext)
+        } catch {
+            markFailed(key)
+            throw error
+        }
     }
 
-    func fingerprint(forTemp tempId: Data) -> Data? {
+    func key(forTemp tempId: Data) -> Data? {
         lock.lock(); defer { lock.unlock() }
-        return byFingerprint.first(where: { $0.value.remoteTempId == tempId })?.key
+        return tempToKey[tempId]
     }
 }

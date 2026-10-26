@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import com.cqchat.app.chat.DedupCache
 import com.cqchat.app.protocol.CQ
@@ -11,7 +13,9 @@ import com.cqchat.app.protocol.CQPacket
 import com.cqchat.app.protocol.FragmentReassembler
 import com.cqchat.app.protocol.Fragmenter
 import java.security.SecureRandom
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 interface BleMeshListener {
     fun onPacket(data: ByteArray)
@@ -31,12 +35,23 @@ class BleMeshService(
     private var scanner: BluetoothLeScanner? = null
     private val centrals = ConcurrentHashMap<String, BluetoothGatt>()
     private val inboxChars = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
+    private val writeQueues = ConcurrentHashMap<String, ConcurrentLinkedQueue<ByteArray>>()
+    private val writeBusy = ConcurrentHashMap<String, Boolean>()
+    private val mtuPayload = ConcurrentHashMap<String, Int>()
     private val dedup = DedupCache()
     private val reassembler = FragmentReassembler()
+    private val handler = Handler(Looper.getMainLooper())
 
     @Volatile
     var tempId: ByteArray = ByteArray(16).also { SecureRandom().nextBytes(it) }
         private set
+
+    val effectivePayloadMtu: Int
+        get() {
+            val vals = mtuPayload.values
+            val link = if (vals.isEmpty()) CQ.BLE_MTU_PAYLOAD else vals.minOrNull() ?: CQ.BLE_MTU_PAYLOAD
+            return maxOf(20, minOf(CQ.BLE_MTU_PAYLOAD, link))
+        }
 
     private val rotate = object : Runnable {
         override fun run() {
@@ -45,7 +60,6 @@ class BleMeshService(
             handler.postDelayed(this, CQ.TEMP_ID_ROTATE_SECS * 1000)
         }
     }
-    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun start() {
         val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -56,17 +70,16 @@ class BleMeshService(
             BluetoothGattCharacteristic.PROPERTY_WRITE or
                 BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_WRITE or
-                BluetoothGattCharacteristic.PERMISSION_READ,
+            BluetoothGattCharacteristic.PERMISSION_WRITE or BluetoothGattCharacteristic.PERMISSION_READ,
         )
-        val cccd = BluetoothGattDescriptor(
-            UUID_CCCD,
-            BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
+        inbox.addDescriptor(
+            BluetoothGattDescriptor(
+                UUID_CCCD,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
+            )
         )
-        inbox.addDescriptor(cccd)
         service.addCharacteristic(inbox)
         gattServer?.addService(service)
-
         advertiser = adapter?.bluetoothLeAdvertiser
         scanner = adapter?.bluetoothLeScanner
         startAdvertising()
@@ -76,35 +89,56 @@ class BleMeshService(
 
     fun stop() {
         handler.removeCallbacks(rotate)
-        advertiser?.stopAdvertising(advertiseCallback)
-        scanner?.stopScan(scanCallback)
-        centrals.values.forEach { it.close() }
-        gattServer?.close()
+        try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
+        try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+        centrals.values.forEach { try { it.close() } catch (_: Exception) {} }
+        centrals.clear()
+        try { gattServer?.close() } catch (_: Exception) {}
     }
 
     fun send(packetData: ByteArray) {
-        val wire = if (packetData.size > CQ.BLE_MTU_PAYLOAD) {
+        val chunk = maxOf(64, effectivePayloadMtu - CQ.HEADER_SIZE - 4)
+        val wire = if (packetData.size > effectivePayloadMtu) {
             val pkt = CQPacket.decode(packetData) ?: return
-            Fragmenter.split(
-                packetData, pkt.sender, pkt.msgId, pkt.ttl,
-                chunkSize = maxOf(64, CQ.BLE_MTU_PAYLOAD - CQ.HEADER_SIZE - 4),
-            )
+            Fragmenter.split(packetData, pkt.sender, pkt.msgId, pkt.ttl, chunk)
         } else listOf(packetData)
 
-        for (chunk in wire) {
-            // Notify subscribed centrals via GATT server
+        for (piece in wire) {
             gattServer?.getService(CQ.SERVICE_UUID)?.getCharacteristic(CQ.INBOX_UUID)?.let { ch ->
-                ch.value = chunk
+                ch.value = piece
                 gattServer?.connectedDevices?.forEach { device ->
                     gattServer?.notifyCharacteristicChanged(device, ch, false)
                 }
             }
-            // Write to peripherals we connected as central
-            for ((addr, gatt) in centrals) {
-                val ch = inboxChars[addr] ?: continue
-                ch.value = chunk
-                gatt.writeCharacteristic(ch)
+            for (addr in centrals.keys) {
+                enqueue(addr, piece)
             }
+        }
+    }
+
+    private fun enqueue(addr: String, data: ByteArray) {
+        writeQueues.getOrPut(addr) { ConcurrentLinkedQueue() }.add(data)
+        pump(addr)
+    }
+
+    private fun pump(addr: String) {
+        if (writeBusy[addr] == true) return
+        val q = writeQueues[addr] ?: return
+        val data = q.poll() ?: return
+        val gatt = centrals[addr] ?: return
+        val ch = inboxChars[addr] ?: return
+        writeBusy[addr] = true
+        ch.value = data
+        ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        if (!gatt.writeCharacteristic(ch)) {
+            writeBusy[addr] = false
+            q.add(data) // requeue
+            handler.postDelayed({ pump(addr) }, 30)
+        } else {
+            handler.postDelayed({
+                writeBusy[addr] = false
+                pump(addr)
+            }, 15)
         }
     }
 
@@ -119,18 +153,20 @@ class BleMeshService(
             .setConnectable(true)
             .setTimeout(0)
             .build()
-        advertiser?.stopAdvertising(advertiseCallback)
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
+        try {
+            advertiser?.stopAdvertising(advertiseCallback)
+            advertiser?.startAdvertising(settings, data, advertiseCallback)
+        } catch (_: Exception) {
+        }
     }
 
     private fun startScanning() {
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(CQ.SERVICE_UUID))
-            .build()
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
-            .build()
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(CQ.SERVICE_UUID)).build()
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build()
+        try {
+            scanner?.startScan(listOf(filter), settings, scanCallback)
+        } catch (_: Exception) {
+        }
     }
 
     private fun handleIncoming(data: ByteArray) {
@@ -143,8 +179,7 @@ class BleMeshService(
         if (pkt.type != CQ.Type.ACK && dedup.seen(pkt.msgId)) return
         listener.onPacket(data)
         if (pkt.ttl > 1) {
-            val relay = pkt.copy(ttl = pkt.ttl - 1)
-            send(relay.encode())
+            send(pkt.copy(ttl = pkt.ttl - 1).encode())
         }
     }
 
@@ -158,28 +193,51 @@ class BleMeshService(
             }
             val device = result.device ?: return
             if (centrals.containsKey(device.address)) return
-            device.connectGatt(context, false, gattCallback)
+            device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val addr = gatt.device.address
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                centrals[gatt.device.address] = gatt
-                gatt.discoverServices()
+                centrals[addr] = gatt
+                gatt.requestMtu(517)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                centrals.remove(gatt.device.address)
-                inboxChars.remove(gatt.device.address)
+                centrals.remove(addr)
+                inboxChars.remove(addr)
+                writeQueues.remove(addr)
+                writeBusy.remove(addr)
+                mtuPayload.remove(addr)
+                try { gatt.close() } catch (_: Exception) {}
             }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                mtuPayload[gatt.device.address] = maxOf(20, mtu - 3)
+            }
+            gatt.discoverServices()
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             val ch = gatt.getService(CQ.SERVICE_UUID)?.getCharacteristic(CQ.INBOX_UUID) ?: return
             inboxChars[gatt.device.address] = ch
             gatt.setCharacteristicNotification(ch, true)
-            val cccd = ch.getDescriptor(UUID_CCCD)
-            cccd?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            if (cccd != null) gatt.writeDescriptor(cccd)
+            ch.getDescriptor(UUID_CCCD)?.let { cccd ->
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                gatt.writeDescriptor(cccd)
+            }
+            pump(gatt.device.address)
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            writeBusy[gatt.device.address] = false
+            pump(gatt.device.address)
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
@@ -205,6 +263,6 @@ class BleMeshService(
     }
 
     companion object {
-        private val UUID_CCCD = java.util.UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        private val UUID_CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 }

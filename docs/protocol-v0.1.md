@@ -198,7 +198,7 @@ Noise `EncryptWithAd(ad="", plaintext)` → ciphertext\|\|tag。
 | `0x01` | UTF-8 文本 |
 | `0x02` | 图片媒体容器 |
 | `0x03` | 语音 CQOP |
-| `0x10` | Hello：`nickname_len:u8 \|\| nickname \|\| ed25519_pk:32`（用于绑定身份指纹） |
+| `0x10` | Hello：`nickname_len:u8 \|\| nickname \|\| ed25519_pk:32 \|\| sig:64`；`sig = Ed25519.Sign(ed25519_pk \|\| nickname)`，证明持有身份钥后再绑定指纹 |
 
 媒体容器（在加密体内）：
 
