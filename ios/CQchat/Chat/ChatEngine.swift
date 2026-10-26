@@ -43,6 +43,7 @@ final class ChatEngine: ObservableObject {
     private let sessions: SessionManager
     private let x25519: Curve25519.KeyAgreement.PrivateKey
     private let ed25519: Curve25519.Signing.PrivateKey
+    private let identityBindingSignature: Data
     private let myFingerprint: Data
     private let dedup = DedupCache()
     private let notifier = LocalNotifier()
@@ -53,6 +54,10 @@ final class ChatEngine: ObservableObject {
         let keys = try IdentityKeys.loadOrCreate()
         self.x25519 = keys.x25519
         self.ed25519 = keys.ed25519
+        self.identityBindingSignature = try IdentityKeys.signIdentityBinding(
+            x25519Private: keys.x25519,
+            ed25519Private: keys.ed25519,
+        )
         self.myFingerprint = IdentityKeys.fingerprint(
             ed25519Public: keys.ed25519.publicKey.rawRepresentation
         )
@@ -118,22 +123,28 @@ final class ChatEngine: ObservableObject {
         let pkt = CQPacket.make(
             type: .handshake,
             sender: ble.currentTempId,
+            destination: peer.tempId,
             payload: payload
         )
         routeOut(pkt.encode(), preferTCP: false)
     }
 
     func sendPrivateText(_ text: String, toFingerprint fp: Data) {
-        guard let plain = Optional(PrivatePlaintext.encode(contentType: .text, body: Data(text.utf8))),
-              let cipher = try? sessions.encrypt(to: fp, plaintext: plain) else { return }
+        guard let remoteTemp = sessions.session(for: fp)?.remoteTempId,
+              let plain = Optional(PrivatePlaintext.encode(contentType: .text, body: Data(text.utf8))) else { return }
         let msgId = Data.random16()
-        let pkt = CQPacket.make(
+        let envelope = CQPacket.make(
             type: .privateMsg,
             sender: ble.currentTempId,
             msgId: msgId,
             flags: CQ.Flag.needsAck,
-            payload: cipher
+            destination: remoteTemp,
+            payload: Data()
         )
+        guard let cipher = try? sessions.encrypt(
+            to: fp, plaintext: plain, associatedData: envelope.associatedData()
+        ) else { return }
+        let pkt = envelope.withPayload(cipher)
         let wire = pkt.encode()
         routeOut(wire, preferTCP: false)
         awaitingAck[msgId] = (wire, 0)
@@ -162,6 +173,7 @@ final class ChatEngine: ObservableObject {
         plain: Data, size: Int, fp: Data, kind: ChatMessage.Kind,
         thumb: Data?, full: Data?, voice: Data? = nil
     ) {
+        guard let remoteTemp = sessions.session(for: fp)?.remoteTempId else { return }
         let hasTCP = tcp.isLikelyOnLocalNetwork
         if size > CQ.mediaBleMax && !hasTCP {
             let msg = ChatMessage(
@@ -173,15 +185,19 @@ final class ChatEngine: ObservableObject {
             appendPrivate(msg, fp: fp)
             return
         }
-        guard let cipher = try? sessions.encrypt(to: fp, plaintext: plain) else { return }
         let msgId = Data.random16()
-        let pkt = CQPacket.make(
+        let envelope = CQPacket.make(
             type: .privateMsg,
             sender: ble.currentTempId,
             msgId: msgId,
             flags: CQ.Flag.needsAck,
-            payload: cipher
+            destination: remoteTemp,
+            payload: Data()
         )
+        guard let cipher = try? sessions.encrypt(
+            to: fp, plaintext: plain, associatedData: envelope.associatedData()
+        ) else { return }
+        let pkt = envelope.withPayload(cipher)
         let wire = pkt.encode()
         let preferTCP = size > 1024 || size > CQ.mediaBleMax
         if preferTCP {
@@ -221,11 +237,15 @@ final class ChatEngine: ObservableObject {
                 let thumb = msg.thumbJPEG ?? Data()
                 let body = MediaContainer.encode(thumb: thumb, data: full)
                 let plain = PrivatePlaintext.encode(contentType: .image, body: body)
-                guard let cipher = try? sessions.encrypt(to: fp, plaintext: plain) else { continue }
-                let pkt = CQPacket.make(
+                guard let remoteTemp = sessions.session(for: fp)?.remoteTempId else { continue }
+                let envelope = CQPacket.make(
                     type: .privateMsg, sender: ble.currentTempId, msgId: msg.id,
-                    flags: CQ.Flag.needsAck, payload: cipher
+                    flags: CQ.Flag.needsAck, destination: remoteTemp, payload: Data()
                 )
+                guard let cipher = try? sessions.encrypt(
+                    to: fp, plaintext: plain, associatedData: envelope.associatedData()
+                ) else { continue }
+                let pkt = envelope.withPayload(cipher)
                 let wire = pkt.encode()
                 _ = tcp.sendPreferTCP(wire)
                 awaitingAck[msg.id] = (wire, 0)
@@ -292,7 +312,10 @@ final class ChatEngine: ObservableObject {
             _ = try? noise.responderRead1(body)
             if let out = try? noise.responderWrite2() {
                 let payload = HandshakePayload.encode(step: 2, body: out)
-                let resp = CQPacket.make(type: .handshake, sender: ble.currentTempId, payload: payload)
+                let resp = CQPacket.make(
+                    type: .handshake, sender: ble.currentTempId,
+                    destination: pkt.sender, payload: payload
+                )
                 routeOut(resp.encode(), preferTCP: false)
             }
         case 2:
@@ -300,62 +323,97 @@ final class ChatEngine: ObservableObject {
             _ = try? noise.initiatorRead2(body)
             if let out = try? noise.initiatorWrite3(payload: encodeHello()) {
                 let payload = HandshakePayload.encode(step: 3, body: out)
-                let resp = CQPacket.make(type: .handshake, sender: ble.currentTempId, payload: payload)
+                let resp = CQPacket.make(
+                    type: .handshake, sender: ble.currentTempId,
+                    destination: pkt.sender, payload: payload
+                )
                 routeOut(resp.encode(), preferTCP: false)
                 sessions.complete(tempId: temp, nickname: "")
-                if let fp = noise.remoteSessionId {
-                    upsertPeer(tempId: temp, fingerprint: fp, nickname: "peer")
-                }
+                // Noise completion is provisional; the Hello binding is still required.
+                upsertPeer(tempId: temp, fingerprint: nil, nickname: "待验证")
             }
         case 3:
             guard let noise = sessions.handshake(forTemp: temp) else { return }
             let payload = (try? noise.responderRead3(body)) ?? Data()
+            guard let (ct, helloBody) = PrivatePlaintext.decode(payload), ct == .hello,
+                  let parsed = parseHello(helloBody),
+                  let remoteX25519 = noise.remoteStatic,
+                  verifyHello(parsed, expectedX25519: remoteX25519)
+            else {
+                sessions.abortHandshake(forTemp: temp)
+                return
+            }
             sessions.complete(tempId: temp)
             guard let sid = noise.remoteSessionId else { return }
-            var idFp = sid
-            var nick = "peer"
-            if let (ct, helloBody) = PrivatePlaintext.decode(payload), ct == .hello,
-               let parsed = parseHello(helloBody) {
-                nick = parsed.0
-                idFp = IdentityKeys.fingerprint(ed25519Public: parsed.1)
-                if idFp != sid { sessions.rebind(fromSessionId: sid, toIdentityFingerprint: idFp) }
+            let idFp = IdentityKeys.fingerprint(ed25519Public: parsed.ed25519Public)
+            guard sessions.authenticate(sessionId: sid, identityFingerprint: idFp, nickname: parsed.nickname) else { return }
+            let envelope = CQPacket.make(
+                type: .privateMsg, sender: ble.currentTempId,
+                destination: temp, payload: Data()
+            )
+            if let hello = try? sessions.encrypt(
+                to: idFp, plaintext: encodeHello(), associatedData: envelope.associatedData()
+            ) {
+                routeOut(envelope.withPayload(hello).encode(), preferTCP: false)
             }
-            sessions.updateNickname(nick, fingerprint: idFp)
-            if let hello = try? sessions.encrypt(to: idFp, plaintext: encodeHello()) {
-                let p = CQPacket.make(type: .privateMsg, sender: ble.currentTempId, payload: hello)
-                routeOut(p.encode(), preferTCP: false)
-            }
-            upsertPeer(tempId: temp, fingerprint: idFp, nickname: nick)
+            upsertPeer(tempId: temp, fingerprint: idFp, nickname: parsed.nickname)
         default:
             break
         }
     }
 
     private func handlePrivate(_ pkt: CQPacket) {
-        if let fp = sessions.fingerprint(forTemp: pkt.sender),
-           let plain = try? sessions.decrypt(from: fp, ciphertext: pkt.payload),
-           let (ct, body) = PrivatePlaintext.decode(plain) {
+        for (key, s) in sessions.allSessionsForDecrypt() {
+            guard let plain = try? s.noise.decrypt(
+                pkt.payload, associatedData: pkt.associatedData()
+            ), let (ct, body) = PrivatePlaintext.decode(plain) else { continue }
+
+            var identityFp = key
+            if ct == .hello {
+                guard let hello = parseHello(body),
+                      verifyHello(hello, expectedX25519: s.noise.remoteStatic) else { continue }
+                let derived = IdentityKeys.fingerprint(ed25519Public: hello.ed25519Public)
+                if !s.isIdentityAuthenticated {
+                    guard sessions.authenticate(
+                        sessionId: s.noise.remoteSessionId ?? key,
+                        identityFingerprint: derived,
+                        nickname: hello.nickname
+                    ) else { continue }
+                } else if derived != key {
+                    continue
+                }
+                identityFp = derived
+            } else if !s.isIdentityAuthenticated {
+                // A completed Noise handshake never authorizes application data.
+                continue
+            }
             consumePrivate(
-                ct: ct, body: body, fp: fp, msgId: pkt.msgId,
-                needsAck: pkt.flags & CQ.Flag.needsAck != 0
-            )
-            return
-        }
-        for (fp, s) in sessions.allSessions() {
-            guard let plain = try? s.noise.decrypt(pkt.payload),
-                  let (ct, body) = PrivatePlaintext.decode(plain) else { continue }
-            consumePrivate(
-                ct: ct, body: body, fp: fp, msgId: pkt.msgId,
-                needsAck: pkt.flags & CQ.Flag.needsAck != 0
+                ct: ct, body: body, fp: identityFp, msgId: pkt.msgId,
+                sender: pkt.sender,
+                needsAck: pkt.flags & CQ.Flag.needsAck != 0,
+                expectedX25519: s.noise.remoteStatic
             )
             return
         }
     }
 
-    private func consumePrivate(ct: CQ.ContentType, body: Data, fp: Data, msgId: Data, needsAck: Bool) {
+    private func consumePrivate(
+        ct: CQ.ContentType,
+        body: Data,
+        fp: Data,
+        msgId: Data,
+        sender: Data,
+        needsAck: Bool,
+        expectedX25519: Data?,
+    ) {
+        let hello = ct == .hello ? parseHello(body) : nil
+        if ct == .hello && (hello == nil || !verifyHello(hello!, expectedX25519: expectedX25519)) {
+            return
+        }
         if needsAck {
             let ack = CQPacket.make(
-                type: .ack, sender: ble.currentTempId, payload: AckPayload.encode(ackMsgId: msgId)
+                type: .ack, sender: ble.currentTempId,
+                destination: sender, payload: AckPayload.encode(ackMsgId: msgId)
             )
             routeOut(ack.encode(), preferTCP: false)
         }
@@ -385,18 +443,14 @@ final class ChatEngine: ObservableObject {
                 ), fp: fp)
             }
         case .hello:
-            if let (nick, edPk) = parseHello(body) {
-                let idFp = IdentityKeys.fingerprint(ed25519Public: edPk)
-                if fp != idFp {
-                    sessions.rebind(fromSessionId: fp, toIdentityFingerprint: idFp)
-                }
-                sessions.updateNickname(nick, fingerprint: idFp)
-                upsertPeer(tempId: Data(), fingerprint: idFp, nickname: nick)
-                if let i = peers.firstIndex(where: { $0.fingerprint == idFp || $0.fingerprint == fp }) {
-                    peers[i].fingerprint = idFp
-                    peers[i].nickname = nick
-                    peers[i].verified = IdentityKeys.isVerified(fingerprint: idFp)
-                }
+            guard let hello else { return }
+            let idFp = IdentityKeys.fingerprint(ed25519Public: hello.ed25519Public)
+            guard fp == idFp, sessions.session(for: idFp)?.isIdentityAuthenticated == true else { return }
+            upsertPeer(tempId: Data(), fingerprint: idFp, nickname: hello.nickname)
+            if let i = peers.firstIndex(where: { $0.fingerprint == idFp || $0.fingerprint == fp }) {
+                peers[i].fingerprint = idFp
+                peers[i].nickname = hello.nickname
+                peers[i].verified = IdentityKeys.isVerified(fingerprint: idFp)
             }
         }
     }
@@ -424,24 +478,43 @@ final class ChatEngine: ObservableObject {
             }
         }
     }
-}
-
 
     private func encodeHello() -> Data {
-        let nick = Data(nickname.utf8)
+        let nick = Data(nickname.utf8.prefix(255))
         var body = Data([UInt8(nick.count)])
         body.append(nick)
         body.append(ed25519.publicKey.rawRepresentation)
+        body.append(x25519.publicKey.rawRepresentation)
+        body.append(identityBindingSignature)
         return PrivatePlaintext.encode(contentType: .hello, body: body)
     }
 
-    private func parseHello(_ body: Data) -> (String, Data)? {
+    private func parseHello(_ body: Data) -> (
+        nickname: String,
+        ed25519Public: Data,
+        x25519Public: Data,
+        signature: Data
+    )? {
         guard let nlen = body.first else { return nil }
         let n = Int(nlen)
-        guard body.count >= 1 + n + 32 else { return nil }
+        guard body.count == 1 + n + 32 + 32 + 64 else { return nil }
         let nick = String(data: body.subdata(in: 1..<(1 + n)), encoding: .utf8) ?? "peer"
-        let pk = body.subdata(in: (1 + n)..<(1 + n + 32))
-        return (nick, pk)
+        let edPk = body.subdata(in: (1 + n)..<(1 + n + 32))
+        let xPk = body.subdata(in: (1 + n + 32)..<(1 + n + 64))
+        let signature = body.subdata(in: (1 + n + 64)..<body.count)
+        return (nick, edPk, xPk, signature)
+    }
+
+    private func verifyHello(
+        _ hello: (nickname: String, ed25519Public: Data, x25519Public: Data, signature: Data),
+        expectedX25519: Data?,
+    ) -> Bool {
+        guard let expectedX25519, expectedX25519 == hello.x25519Public else { return false }
+        return IdentityKeys.verifyIdentityBinding(
+            ed25519Public: hello.ed25519Public,
+            x25519Public: hello.x25519Public,
+            signature: hello.signature,
+        )
     }
 
     private func markDelivered(_ msgId: Data) {
@@ -452,6 +525,7 @@ final class ChatEngine: ObservableObject {
             }
         }
     }
+}
 
 extension ChatEngine: BleMeshDelegate {
     nonisolated func bleDidReceive(packet: Data, fromTempId: Data?) {

@@ -2,7 +2,7 @@ import Foundation
 import CoreBluetooth
 
 enum CQ {
-    static let version: UInt8 = 0x01
+    static let version: UInt8 = 0x02
     static let bleMtuPayload = 512
     static let ttlDefault: UInt8 = 7
     static let tempIdRotateSecs: TimeInterval = 180
@@ -39,6 +39,7 @@ enum CQ {
         case hello = 0x10
     }
 
-    static let headerSize = 38
+    // version/type/flags + sender/msgId/destination/nextHop + ttl/length
+    static let headerSize = 70
     static let qrPrefix = "cqchat:v1:"
 }

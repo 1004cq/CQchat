@@ -6,11 +6,33 @@ struct CQPacket: Equatable {
     var flags: UInt8
     var sender: Data // 16
     var msgId: Data // 16
+    var destination: Data // 16; all-zero means broadcast
+    var nextHop: Data // 16; all-zero means any adjacent relay
     var ttl: UInt8
     var payload: Data
 
+    /// Authenticates immutable envelope metadata; TTL is hop-by-hop and excluded.
+    func associatedData() -> Data {
+        var out = Data("CQchat packet AD v2".utf8)
+        out.append(version)
+        out.append(type)
+        out.append(flags)
+        out.append(sender)
+        out.append(msgId)
+        out.append(destination)
+        out.append(nextHop)
+        return out
+    }
+
+    func withPayload(_ payload: Data) -> CQPacket {
+        var copy = self
+        copy.payload = payload
+        return copy
+    }
+
     func encode() -> Data {
         precondition(sender.count == 16 && msgId.count == 16)
+        precondition(destination.count == 16 && nextHop.count == 16)
         precondition(payload.count <= 0xFFFF)
         var out = Data(capacity: CQ.headerSize + payload.count)
         out.append(version)
@@ -18,6 +40,8 @@ struct CQPacket: Equatable {
         out.append(flags)
         out.append(sender)
         out.append(msgId)
+        out.append(destination)
+        out.append(nextHop)
         out.append(ttl)
         var len = UInt16(payload.count).bigEndian
         withUnsafeBytes(of: &len) { out.append(contentsOf: $0) }
@@ -32,13 +56,16 @@ struct CQPacket: Equatable {
         let flags = data[2]
         let sender = data.subdata(in: 3..<19)
         let msgId = data.subdata(in: 19..<35)
-        let ttl = data[35]
-        let plen = Int(UInt16(data[36]) << 8 | UInt16(data[37]))
-        guard data.count >= CQ.headerSize + plen else { return nil }
+        let destination = data.subdata(in: 35..<51)
+        let nextHop = data.subdata(in: 51..<67)
+        let ttl = data[67]
+        let plen = Int(UInt16(data[68]) << 8 | UInt16(data[69]))
+        guard data.count == CQ.headerSize + plen else { return nil }
         let payload = data.subdata(in: CQ.headerSize..<(CQ.headerSize + plen))
         return CQPacket(
             version: version, type: type, flags: flags,
-            sender: sender, msgId: msgId, ttl: ttl, payload: payload
+            sender: sender, msgId: msgId, destination: destination,
+            nextHop: nextHop, ttl: ttl, payload: payload
         )
     }
 
@@ -48,12 +75,19 @@ struct CQPacket: Equatable {
         msgId: Data = Data.random16(),
         ttl: UInt8 = CQ.ttlDefault,
         flags: UInt8 = 0,
+        destination: Data = Data(repeating: 0, count: 16),
+        nextHop: Data = Data(repeating: 0, count: 16),
         payload: Data
     ) -> CQPacket {
         CQPacket(
             version: CQ.version, type: type.rawValue, flags: flags,
-            sender: sender, msgId: msgId, ttl: ttl, payload: payload
+            sender: sender, msgId: msgId, destination: destination,
+            nextHop: nextHop, ttl: ttl, payload: payload
         )
+    }
+
+    static func isBroadcastAddress(_ address: Data) -> Bool {
+        address.count == 16 && address.allSatisfy { $0 == 0 }
     }
 }
 

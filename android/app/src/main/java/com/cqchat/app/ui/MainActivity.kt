@@ -1,7 +1,6 @@
 package com.cqchat.app.ui
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -28,7 +27,6 @@ import com.cqchat.app.chat.ChatEngine
 import com.cqchat.app.chat.ChatMessage
 import com.cqchat.app.chat.Peer
 import com.cqchat.app.protocol.toHex
-import com.cqchat.app.transport.MeshForegroundService
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
@@ -36,39 +34,64 @@ import com.journeyapps.barcodescanner.ScanOptions
 
 class MainActivity : ComponentActivity() {
     private val engine: ChatEngine by viewModels()
+    private var meshStarted = false
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        if (result.values.all { it }) startMesh()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestPerms()
-        startForegroundService(Intent(this, MeshForegroundService::class.java))
-        engine.start()
         setContent {
             MaterialTheme {
                 AppScaffold(engine)
             }
         }
+        ensurePermissions()
     }
 
-    private fun requestPerms() {
-        val needed = mutableListOf(
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO,
-        )
+    private fun requiredPermissions(): Array<String> {
+        val needed = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 31) {
             needed += Manifest.permission.BLUETOOTH_SCAN
             needed += Manifest.permission.BLUETOOTH_CONNECT
             needed += Manifest.permission.BLUETOOTH_ADVERTISE
+        } else {
+            // Android 11 and below requires location permission for BLE scanning.
+            needed += Manifest.permission.ACCESS_FINE_LOCATION
         }
         if (Build.VERSION.SDK_INT >= 33) {
             needed += Manifest.permission.POST_NOTIFICATIONS
         }
+        return needed.toTypedArray()
+    }
+
+    private fun ensurePermissions() {
+        val missing = requiredPermissions().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) startMesh()
+        else permissionLauncher.launch(missing.toTypedArray())
+    }
+
+    private fun startMesh() {
+        if (meshStarted) return
+        meshStarted = true
+        // ChatEngine is the single transport owner for this client instance.
+        // Do not start a second BLE stack in MeshForegroundService: duplicate
+        // advertisers/scanners can create competing GATT connections.
+        engine.start()
+    }
+
+    @Deprecated("Use the Activity Result permission launcher")
+    private fun requestPerms() {
+        val needed = requiredPermissions().toList()
         val missing = needed.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), 1001)
-        }
+        if (missing.isEmpty()) startMesh() else permissionLauncher.launch(missing.toTypedArray())
     }
 }
 
@@ -203,10 +226,20 @@ fun PrivateScreen(engine: ChatEngine, peer: Peer, onBack: () -> Unit) {
 fun MeScreen(engine: ChatEngine) {
     var nick by remember { mutableStateOf(engine.identity.nickname) }
     var scanResult by remember { mutableStateOf<String?>(null) }
+    var waitingForCamera by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let {
             engine.markVerified(it)
             scanResult = it
+        }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && waitingForCamera) {
+            waitingForCamera = false
+            scanLauncher.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE))
         }
     }
     Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -221,8 +254,12 @@ fun MeScreen(engine: ChatEngine) {
         QrImage(engine.identity.qrPayload())
         Spacer(Modifier.height(12.dp))
         Button(onClick = {
-            val opts = ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            scanLauncher.launch(opts)
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                scanLauncher.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE))
+            } else {
+                waitingForCamera = true
+                cameraPermission.launch(Manifest.permission.CAMERA)
+            }
         }) { Text("扫对方二维码") }
         scanResult?.let { Text("已标记验证") }
     }

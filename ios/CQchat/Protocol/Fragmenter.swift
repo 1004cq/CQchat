@@ -9,6 +9,8 @@ enum Fragmenter {
         ttl: UInt8,
         chunkSize: Int = CQ.bleMtuPayload
     ) -> [Data] {
+        guard let original = CQPacket.decode(rawPacket),
+              original.sender == sender, original.msgId == msgId else { return [] }
         let total = max(1, (rawPacket.count + chunkSize - 1) / chunkSize)
         var out: [Data] = []
         for i in 0..<total {
@@ -21,6 +23,8 @@ enum Fragmenter {
                 sender: sender,
                 msgId: msgId,
                 ttl: ttl,
+                destination: original.destination,
+                nextHop: original.nextHop,
                 payload: payload
             )
             out.append(pkt.encode())

@@ -102,6 +102,8 @@ final class BleMeshService: NSObject {
 
     private func handleIncoming(_ data: Data) {
         guard let pkt = CQPacket.decode(data), pkt.version == CQ.version else { return }
+        // A non-zero next_hop is a per-hop unicast constraint.
+        if !CQPacket.isBroadcastAddress(pkt.nextHop), pkt.nextHop != tempId { return }
         if pkt.type == CQ.PacketType.fragment.rawValue {
             if let raw = reassembler.ingest(fragmentPacket: pkt) {
                 handleIncoming(raw)
@@ -113,8 +115,11 @@ final class BleMeshService: NSObject {
         }
         delegate?.bleDidReceive(packet: data, fromTempId: pkt.sender)
 
-        // Mesh relay
-        if pkt.ttl > 1 {
+        // destination/next_hop are authenticated end-to-end and cannot be
+        // rewritten by a relay. TTL remains the only mutable hop field here.
+        let isLocalDestination =
+            !CQPacket.isBroadcastAddress(pkt.destination) && pkt.destination == tempId
+        if !isLocalDestination, pkt.ttl > 1 {
             var relay = pkt
             relay.ttl -= 1
             // slight jitter could be added; keep simple for MVP

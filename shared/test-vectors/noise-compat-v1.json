@@ -1,0 +1,13 @@
+{
+  "protocol": "Noise_XX_25519_ChaChaPoly_SHA256",
+  "implementation_variant": "CQchat-v1-compatible",
+  "x25519_low_order_public_key_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "expected_result": "reject",
+  "expected_error": "invalidKey",
+  "notes": "Both Android and iOS must reject the all-zero X25519 shared secret before HKDF/session creation.",
+  "binding_message_test": {
+    "x25519_public_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ed25519_public_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "message_hex": "435163686174206964656e746974792062696e64696e6720763101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+  }
+}

@@ -91,6 +91,19 @@ class IdentityStore(context: Context) {
         }
     }
 
+    fun signIdentityBinding(x25519PublicKey: ByteArray = x25519Public): ByteArray =
+        sign(IdentityCrypto.identityBindingMessage(x25519PublicKey, ed25519Public))
+
+    fun verifyIdentityBinding(
+        ed25519PublicKey: ByteArray,
+        x25519PublicKey: ByteArray,
+        signature: ByteArray,
+    ): Boolean = verify(
+        ed25519PublicKey,
+        IdentityCrypto.identityBindingMessage(x25519PublicKey, ed25519PublicKey),
+        signature,
+    )
+
     private fun loadOrCreateSeed(): ByteArray {
         val wrapped = prefs.getString(PREF_WRAPPED, null)
         if (wrapped != null) {

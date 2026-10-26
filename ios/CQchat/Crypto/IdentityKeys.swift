@@ -40,6 +40,37 @@ enum IdentityKeys {
         Data(SHA256.hash(data: x25519Public)).prefix(16)
     }
 
+    /// Bytes signed by Ed25519 to bind the stable identity to Noise X25519.
+    static func identityBindingMessage(x25519Public: Data, ed25519Public: Data) -> Data {
+        precondition(x25519Public.count == 32 && ed25519Public.count == 32)
+        return Data("CQchat identity binding v1".utf8) + Data([1]) + x25519Public + ed25519Public
+    }
+
+    static func signIdentityBinding(
+        x25519Private: Curve25519.KeyAgreement.PrivateKey,
+        ed25519Private: Curve25519.Signing.PrivateKey,
+    ) throws -> Data {
+        let message = identityBindingMessage(
+            x25519Public: x25519Private.publicKey.rawRepresentation,
+            ed25519Public: ed25519Private.publicKey.rawRepresentation,
+        )
+        return try ed25519Private.signature(for: message)
+    }
+
+    static func verifyIdentityBinding(
+        ed25519Public: Data,
+        x25519Public: Data,
+        signature: Data,
+    ) -> Bool {
+        guard ed25519Public.count == 32, x25519Public.count == 32, signature.count == 64,
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: ed25519Public)
+        else { return false }
+        return key.isValidSignature(
+            signature,
+            for: identityBindingMessage(x25519Public: x25519Public, ed25519Public: ed25519Public)
+        )
+    }
+
     static func qrString(fingerprint: Data) -> String {
         CQ.qrPrefix + fingerprint.hex
     }

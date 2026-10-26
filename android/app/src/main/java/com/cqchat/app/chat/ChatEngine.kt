@@ -54,8 +54,18 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
 
     private lateinit var ble: BleMeshService
     private lateinit var tcp: HotspotTcpService
+    private var started = false
+
+    private data class HelloIdentity(
+        val nickname: String,
+        val ed25519Public: ByteArray,
+        val x25519Public: ByteArray,
+        val bindingSignature: ByteArray,
+    )
 
     fun start() {
+        if (started) return
+        started = true
         ble = BleMeshService(getApplication(), this)
         tcp = HotspotTcpService(getApplication(), this)
         ble.start()
@@ -65,6 +75,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     override fun onCleared() {
         if (::ble.isInitialized) ble.stop()
         if (::tcp.isInitialized) tcp.stop()
+        started = false
     }
 
     fun markVerified(qr: String) {
@@ -76,6 +87,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     }
 
     fun sendPublic(text: String) {
+        if (!started) return
         val msgId = CQPacket.random16()
         val signMsg = BroadcastPayload.signMessage(msgId, identity.nickname, text)
         val sig = identity.sign(signMsg)
@@ -89,22 +101,27 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     }
 
     fun startPrivate(peer: Peer) {
+        if (!started) return
         val noise = sessions.begin(NoiseXX.Role.INITIATOR, peer.tempId)
         val body = noise.initiatorWrite1()
         val payload = HandshakePayload.encode(1, body)
-        val pkt = CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload)
+        val pkt = CQPacket.make(
+            CQ.Type.HANDSHAKE, ble.tempId, destination = peer.tempId, payload = payload
+        )
         routeOut(pkt.encode(), preferTcp = false)
     }
 
     fun sendPrivateText(text: String, fp: ByteArray) {
+        if (!started) return
         val session = sessions.session(fp) ?: return
         val plain = PrivatePlaintext.encode(CQ.Content.TEXT, text.toByteArray(Charsets.UTF_8))
-        val cipher = session.noise.encrypt(plain)
         val msgId = CQPacket.random16()
-        val pkt = CQPacket.make(
+        val envelope = CQPacket.make(
             CQ.Type.PRIVATE, ble.tempId, msgId,
-            flags = CQ.Flag.NEEDS_ACK, payload = cipher,
+            flags = CQ.Flag.NEEDS_ACK, payload = ByteArray(0),
+            destination = session.remoteTempId,
         )
+        val pkt = envelope.copy(payload = session.noise.encrypt(plain, envelope.associatedData()))
         val wire = pkt.encode()
         routeOut(wire, preferTcp = false)
         awaitingAck[msgId.toHex()] = wire
@@ -146,12 +163,13 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             if (kind == ChatMessage.Kind.IMAGE) CQ.Content.IMAGE else CQ.Content.VOICE,
             body,
         )
-        val cipher = session.noise.encrypt(plain)
         val msgId = CQPacket.random16()
-        val pkt = CQPacket.make(
+        val envelope = CQPacket.make(
             CQ.Type.PRIVATE, ble.tempId, msgId,
-            flags = CQ.Flag.NEEDS_ACK, payload = cipher,
+            flags = CQ.Flag.NEEDS_ACK, payload = ByteArray(0),
+            destination = session.remoteTempId,
         )
+        val pkt = envelope.copy(payload = session.noise.encrypt(plain, envelope.associatedData()))
         val wire = pkt.encode()
         val preferTcp = size > 1024 || size > CQ.MEDIA_BLE_MAX
         if (preferTcp) {
@@ -246,56 +264,83 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                 noise.responderRead1(body)
                 val out = noise.responderWrite2()
                 val payload = HandshakePayload.encode(2, out)
-                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload).encode(), false)
+                routeOut(
+                    CQPacket.make(
+                        CQ.Type.HANDSHAKE, ble.tempId,
+                        destination = pkt.sender, payload = payload,
+                    ).encode(), false
+                )
             }
             2 -> {
                 val noise = sessions.handshake(temp) ?: return
                 noise.initiatorRead2(body)
                 val out = noise.initiatorWrite3(encodeHello())
                 val payload = HandshakePayload.encode(3, out)
-                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload).encode(), false)
+                routeOut(
+                    CQPacket.make(
+                        CQ.Type.HANDSHAKE, ble.tempId,
+                        destination = pkt.sender, payload = payload,
+                    ).encode(), false
+                )
                 sessions.complete(temp)
-                noise.remoteSessionId?.let { upsertPeer(temp, it, "peer") }
+                // Noise completion is provisional; Hello still has to bind the identity.
+                upsertPeer(temp, null, "待验证")
             }
             3 -> {
                 val noise = sessions.handshake(temp) ?: return
                 val payload = noise.responderRead3(body)
+                val hello = PrivatePlaintext.decode(payload)
+                    ?.takeIf { it.first == CQ.Content.HELLO }
+                    ?.second
+                    ?.let(::parseHello)
+                val remoteX25519 = noise.remoteStatic
+                if (hello == null || !verifyHello(hello, remoteX25519)) {
+                    sessions.abort(temp)
+                    return
+                }
                 sessions.complete(temp)
                 val sid = noise.remoteSessionId ?: return
-                var idFp = sid
-                var nick = "peer"
-                PrivatePlaintext.decode(payload)?.let { (ct, b) ->
-                    if (ct == CQ.Content.HELLO) {
-                        parseHello(b)?.let { (n, edPk) ->
-                            nick = n
-                            idFp = IdentityCrypto.fingerprint(edPk)
-                            if (!idFp.contentEquals(sid)) sessions.rebind(sid, idFp)
-                        }
-                    }
-                }
-                sessions.updateNickname(idFp, nick)
-                sessions.session(idFp)?.noise?.encrypt(encodeHello())?.let { cipher ->
+                val idFp = IdentityCrypto.fingerprint(hello.ed25519Public)
+                if (!sessions.authenticate(sid, idFp, hello.nickname)) return
+                sessions.session(idFp)?.let { session ->
+                    val envelope = CQPacket.make(
+                        CQ.Type.PRIVATE, ble.tempId, destination = temp, payload = ByteArray(0),
+                    )
+                    val cipher = session.noise.encrypt(encodeHello(), envelope.associatedData())
                     routeOut(
-                        CQPacket.make(CQ.Type.PRIVATE, ble.tempId, payload = cipher).encode(),
+                        envelope.copy(payload = cipher).encode(),
                         false,
                     )
                 }
-                upsertPeer(temp, idFp, nick)
+                upsertPeer(temp, idFp, hello.nickname)
             }
         }
     }
 
     private fun handlePrivate(pkt: CQPacket) {
-        for ((fp, s) in sessions.all()) {
+        for ((key, s) in sessions.allForDecrypt()) {
             val plain = try {
-                s.noise.decrypt(pkt.payload)
+                s.noise.decrypt(pkt.payload, pkt.associatedData())
             } catch (_: Exception) {
                 continue
             }
             val (ct, body) = PrivatePlaintext.decode(plain) ?: continue
+            val hello = if (ct == CQ.Content.HELLO) parseHello(body) else null
+            if (ct == CQ.Content.HELLO) {
+                if (hello == null || !verifyHello(hello, s.noise.remoteStatic)) continue
+                val sid = s.noise.remoteSessionId ?: key
+                val idFp = IdentityCrypto.fingerprint(hello.ed25519Public)
+                if (!s.isIdentityAuthenticated()) {
+                    if (!sessions.authenticate(sid, idFp, hello.nickname)) continue
+                } else if (!idFp.contentEquals(key)) continue
+            } else if (!s.isIdentityAuthenticated()) {
+                // A completed Noise handshake alone never authorizes application data.
+                continue
+            }
             if (pkt.flags and CQ.Flag.NEEDS_ACK != 0) {
                 val ack = CQPacket.make(
                     CQ.Type.ACK, ble.tempId,
+                    destination = pkt.sender,
                     payload = AckPayload.encode(pkt.msgId),
                 )
                 routeOut(ack.encode(), false)
@@ -303,35 +348,36 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             when (ct) {
                 CQ.Content.TEXT -> {
                     val text = body.toString(Charsets.UTF_8)
-                    appendPrivate(fp, ChatMessage(
-                        pkt.msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = fp,
+                    appendPrivate(key, ChatMessage(
+                        pkt.msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = key,
                         fromNickname = s.nickname, isPublic = false, status = ChatMessage.Status.RECEIVED,
                     ))
                     notifier.message("私聊", text)
                 }
                 CQ.Content.IMAGE -> {
                     val (thumb, data) = MediaContainer.decode(body) ?: return
-                    appendPrivate(fp, ChatMessage(
+                    appendPrivate(key, ChatMessage(
                         pkt.msgId, ChatMessage.Kind.IMAGE, imageJpeg = data, thumbJpeg = thumb,
-                        fromFingerprint = fp, fromNickname = s.nickname, isPublic = false,
+                        fromFingerprint = key, fromNickname = s.nickname, isPublic = false,
                         status = ChatMessage.Status.RECEIVED,
                     ))
                 }
                 CQ.Content.VOICE -> {
                     val (_, data) = MediaContainer.decode(body) ?: return
-                    appendPrivate(fp, ChatMessage(
+                    appendPrivate(key, ChatMessage(
                         pkt.msgId, ChatMessage.Kind.VOICE, voiceCqop = data,
-                        fromFingerprint = fp, fromNickname = s.nickname, isPublic = false,
+                        fromFingerprint = key, fromNickname = s.nickname, isPublic = false,
                         status = ChatMessage.Status.RECEIVED,
                     ))
                 }
                 CQ.Content.HELLO -> {
-                    parseHello(body)?.let { (nick, edPk) ->
-                        val idFp = IdentityCrypto.fingerprint(edPk)
-                        if (!idFp.contentEquals(fp)) sessions.rebind(fp, idFp)
-                        sessions.updateNickname(idFp, nick)
-                        upsertPeer(s.remoteTempId, idFp, nick)
-                    }
+                    val verifiedHello = hello ?: return
+                    val idFp = IdentityCrypto.fingerprint(verifiedHello.ed25519Public)
+                    // authenticate() above may have moved the session out of
+                    // the provisional table; validate the committed table,
+                    // not the stale local Session snapshot.
+                    if (sessions.session(idFp) == null) return
+                    upsertPeer(s.remoteTempId, idFp, verifiedHello.nickname)
                 }
             }
             return
@@ -341,18 +387,33 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
 
 
     private fun encodeHello(): ByteArray {
-        val nick = identity.nickname.toByteArray(Charsets.UTF_8)
-        val body = byteArrayOf(nick.size.toByte()) + nick + identity.ed25519Public
+        val nicknameBytes = identity.nickname.toByteArray(Charsets.UTF_8)
+        val nick = nicknameBytes.copyOf(minOf(255, nicknameBytes.size))
+        val bindingSignature = identity.signIdentityBinding()
+        val body = byteArrayOf(nick.size.toByte()) + nick +
+            identity.ed25519Public + identity.x25519Public + bindingSignature
         return PrivatePlaintext.encode(CQ.Content.HELLO, body)
     }
 
-    private fun parseHello(body: ByteArray): Pair<String, ByteArray>? {
+    private fun parseHello(body: ByteArray): HelloIdentity? {
         if (body.isEmpty()) return null
         val n = body[0].toInt() and 0xff
-        if (body.size < 1 + n + 32) return null
+        if (body.size != 1 + n + 32 + 32 + 64) return null
         val nick = body.copyOfRange(1, 1 + n).toString(Charsets.UTF_8)
-        val pk = body.copyOfRange(1 + n, 1 + n + 32)
-        return nick to pk
+        val edPk = body.copyOfRange(1 + n, 1 + n + 32)
+        val xPk = body.copyOfRange(1 + n + 32, 1 + n + 64)
+        val signature = body.copyOfRange(1 + n + 64, body.size)
+        return HelloIdentity(nick, edPk, xPk, signature)
+    }
+
+    private fun verifyHello(hello: HelloIdentity, expectedX25519: ByteArray?): Boolean {
+        return expectedX25519 != null &&
+            expectedX25519.contentEquals(hello.x25519Public) &&
+            identity.verifyIdentityBinding(
+                hello.ed25519Public,
+                hello.x25519Public,
+                hello.bindingSignature,
+            )
     }
 
     private fun markDelivered(msgId: ByteArray) {

@@ -1,12 +1,12 @@
 # CQchat Protocol v0.1
 
-可执行规范。字节序、长度、未知字段、版本协商、错误与重试以本文为准。  
-机器可读向量：[`../shared/test-vectors/v0.1.json`](../shared/test-vectors/v0.1.json)。  
+可执行规范。字节序、长度、未知字段、版本协商、错误与重试以本文为准。
+机器可读向量：[`../shared/test-vectors/v0.1.json`](../shared/test-vectors/v0.1.json)。
 实现入口：`ios/`、`android/`；共享参考编码：`shared/reference/`。
 
-**版本号：** 传输信封 `version = 0x01`（与 v0.1 规范对应）。  
-**端序：** 除 Noise AEAD nonce 计数（小端）外，多字节整数一律 **大端**。  
-**字符串：** UTF-8，无 BOM。  
+**版本号：** 传输信封 `version = 0x02`（加入 `destination`/`next_hop` 的包头版本）。旧 `0x01` 包头不得按新格式解析。
+**端序：** 除 Noise AEAD nonce 计数（小端）外，多字节整数一律 **大端**。
+**字符串：** UTF-8，无 BOM。
 **未知 `type` / 未知 `flags` bit：** 丢弃该包，不崩溃；不得当作成功。
 
 ---
@@ -16,7 +16,7 @@
 | 层 | 职责 | 可见信息 |
 |---|---|---|
 | 载体（BLE / TCP） | 搬字节 | 密文信封 |
-| 传输信封 | 转发、去重、分片、TTL | `version/type/flags/sender/msg_id/ttl/payload_len` |
+| 传输信封 | 转发、去重、分片、TTL、定向路由 | `version/type/flags/sender/msg_id/destination/next_hop/ttl/payload_len` |
 | 加密载荷 | 会话明文 | 仅会话双方 |
 
 路由/中继节点 **不得** 依赖昵称、长期公钥、聊天正文或媒体类型做转发决策。
@@ -29,10 +29,10 @@
 
 | 名称 | 值 |
 |---|---|
-| `VERSION` | `0x01` |
-| `HEADER_SIZE` | `38` |
+| `VERSION` | `0x02` |
+| `HEADER_SIZE` | `70` |
 | `BLE_MTU_PAYLOAD` | `512`（再按协商 MTU−3 收紧） |
-| `MAX_ENVELOPE` | `65535 + 38`（受 `payload_len` u16 限制） |
+| `MAX_ENVELOPE` | `65535 + 70`（受 `payload_len` u16 限制） |
 | `TTL_DEFAULT` | `7` |
 | `MSG_EXPIRY_SECS` | `600`（时间有效期，与 TTL 独立） |
 | `MAX_RETRIES` | `5`（同一路径） |
@@ -77,10 +77,17 @@ ed25519_seed  = HKDF-SHA256(ikm=identity_seed, salt=32×0x00, info="cqchat-v1-ed
 fingerprint   = SHA256(ed25519_public)[0..16)   // 二维码身份；与 X25519 公钥区分
 ```
 
-QR：`cqchat:v1:` + fingerprint 的 32 位小写 hex。  
+QR：`cqchat:v1:` + fingerprint 的 32 位小写 hex。
 扫码 = 建立可识别的长期身份关系；未扫 = 临时匿名设备。
 
-昵称不参与认证。
+昵称不参与认证。为防止将一个 Ed25519 身份错误绑定到另一把 Noise 静态密钥，Hello 还必须携带身份绑定签名：
+
+```
+binding_message = UTF8("CQchat identity binding v1") || u8(1) || x25519_public:32 || ed25519_public:32
+binding_signature = Ed25519.Sign(ed25519_private, binding_message)
+```
+
+接收方必须同时验证：Hello 中的 `x25519_public` 等于当前 Noise 会话解出的远端静态公钥，且 `binding_signature` 能由 Hello 中的 `ed25519_public` 验证通过；否则不得将临时会话 rebind 到该 Ed25519 fingerprint。
 
 ### Noise
 
@@ -106,9 +113,20 @@ QR：`cqchat:v1:` + fingerprint 的 32 位小写 hex。
 | 2 | 1 | `flags` |
 | 3 | 16 | `sender` = 当前 temp_id |
 | 19 | 16 | `msg_id` = CSPRNG(16)，≥128 bit 随机；禁止时间戳/指纹拼接 |
-| 35 | 1 | `ttl` |
-| 36 | 2 | `payload_len` u16 BE |
-| 38 | N | `payload` |
+| 35 | 16 | `destination` = 目标节点 temp_id；全零表示广播 |
+| 51 | 16 | `next_hop` = 当前期望下一跳 temp_id；全零表示由邻居自主接收 |
+| 67 | 1 | `ttl` |
+| 68 | 2 | `payload_len` u16 BE |
+| 70 | N | `payload` |
+
+### 定向转发语义
+
+- `destination` 和 `next_hop` 都使用 16 字节临时节点 ID；全零地址是广播哨兵值。
+- 节点收到非全零 `next_hop` 且不等于自己的 `temp_id` 时，必须丢弃，不得交给业务层或继续转发。
+- `destination` 等于本机 `temp_id` 时，节点可以交付业务，但不得继续转发该包。
+- 当前基础实现没有完整路由表；由于 `destination`/`next_hop` 已被端到端 AD 认证，中继节点不得改写它们。需要逐跳改写下一跳时，必须新增独立的逐跳外层信封。
+- `sender` 保持为原始发送节点，不在中继时改写；`msg_id` 在全路径保持不变。
+- 私密包的 AEAD AD 为 `UTF8("CQchat packet AD v2") || version || type || flags || sender || msg_id || destination || next_hop`。其中 `destination`、`next_hop` 和其他字段按上述固定顺序编码；`payload_len` 不纳入 AD（由密文长度校验），`ttl` 也不纳入 AD，因为 TTL 允许中继逐跳递减。任何 AD 字段被篡改都会导致 AEAD 验证失败。
 
 ### flags
 
@@ -185,7 +203,16 @@ nickname_len:u8 | nickname | text_len:u16 BE | text | ed25519_pk:32 | sig:64
 pattern:u8=1 | step:u8∈{1,2,3} | body
 ```
 
-完成后绑定对方 `fingerprint`（Ed25519）。Hello 可在 handshake payload 或随后 PRIVATE 中交换昵称。
+完成后只有在 Hello 的 Ed25519-X25519 绑定签名验证通过后，才可绑定对方 `fingerprint`（Ed25519）。Hello 可在 handshake payload 或随后 PRIVATE 中交换昵称。
+
+### 会话身份状态
+
+实现必须区分以下两个状态：
+
+1. `HANDSHAKE_COMPLETE`：Noise XX 已完成，且远端静态 X25519 公钥已确定；会话只能保存在临时表中，只允许处理一个经过 AEAD 保护的 Hello，不能发送或交付普通私聊、不能更新已识别联系人、不能触发私聊通知。
+2. `IDENTITY_AUTHENTICATED`：接收方验证 Hello 的 `x25519_public` 等于 Noise 远端静态公钥，验证 Ed25519 绑定签名，并由该公钥计算出 fingerprint 后，原子地将会话从临时表移动到身份表。只有身份表中的会话可以用于普通私聊。
+
+状态只能单向切换 `HANDSHAKE_COMPLETE → IDENTITY_AUTHENTICATED`。指纹冲突、重复 Hello 携带不同身份、签名失败或 X25519 不匹配都必须拒绝，不得覆盖已有身份会话；临时会话超时后应连同 Noise 状态一起销毁。`IDENTITY_AUTHENTICATED` 表示密码学身份绑定已验证，不等同于用户通过 QR 完成人工信任确认。
 
 ### PRIVATE `0x04`
 
@@ -198,7 +225,7 @@ Noise `EncryptWithAd(ad="", plaintext)` → ciphertext\|\|tag。
 | `0x01` | UTF-8 文本 |
 | `0x02` | 图片媒体容器 |
 | `0x03` | 语音 CQOP |
-| `0x10` | Hello：`nickname_len:u8 \|\| nickname \|\| ed25519_pk:32`（用于绑定身份指纹） |
+| `0x10` | Hello：`nickname_len:u8 \|\| nickname \|\| ed25519_pk:32 \|\| x25519_pk:32 \|\| binding_sig:64` |
 
 媒体容器（在加密体内）：
 
@@ -220,7 +247,7 @@ thumb_len:u32 BE | thumb | data_len:u32 BE | data
 index:u16 BE | total:u16 BE | data
 ```
 
-须容忍乱序、重复、丢失。未完成对象有内存上限；超时/`DEDUP_TTL` 后丢弃。分片不再二次分片。  
+须容忍乱序、重复、丢失。未完成对象有内存上限；超时/`DEDUP_TTL` 后丢弃。分片不再二次分片。
 v0.1 **不要求** 媒体断点续传（列为后续）；丢失则整消息失败并可同 `msg_id` 重发。
 
 ### CQOP 语音
@@ -266,8 +293,8 @@ v0.1 **不要求** 媒体断点续传（列为后续）；丢失则整消息失�
 
 ## 9. 版本协商
 
-对方 `version >` 本端：丢弃并可选 DISCOVER 指示本端版本。  
-对方 `version <` 且不兼容：丢弃。v0.1 仅接受 `0x01`。
+对方 `version >` 本端：丢弃并可选 DISCOVER 指示本端版本。
+对方 `version <` 且不兼容：丢弃。当前实现仅接受 `0x02` 包头；`0x01` 包头不得按新格式解析。
 
 ---
 

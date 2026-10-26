@@ -10,11 +10,20 @@ data class CQPacket(
     val flags: Int,
     val sender: ByteArray,
     val msgId: ByteArray,
+    val destination: ByteArray,
+    val nextHop: ByteArray,
     val ttl: Int,
     val payload: ByteArray,
 ) {
+    /** Authenticates immutable envelope metadata; TTL is hop-by-hop and excluded. */
+    fun associatedData(): ByteArray =
+        "CQchat packet AD v2".toByteArray(Charsets.UTF_8) + byteArrayOf(
+            version.toByte(), type.toByte(), flags.toByte(),
+        ) + sender + msgId + destination + nextHop
+
     fun encode(): ByteArray {
         require(sender.size == 16 && msgId.size == 16)
+        require(destination.size == 16 && nextHop.size == 16)
         require(payload.size <= 0xFFFF)
         val buf = ByteBuffer.allocate(CQ.HEADER_SIZE + payload.size).order(ByteOrder.BIG_ENDIAN)
         buf.put(version.toByte())
@@ -22,6 +31,8 @@ data class CQPacket(
         buf.put(flags.toByte())
         buf.put(sender)
         buf.put(msgId)
+        buf.put(destination)
+        buf.put(nextHop)
         buf.put(ttl.toByte())
         buf.putShort(payload.size.toShort())
         buf.put(payload)
@@ -37,11 +48,13 @@ data class CQPacket(
             val flags = buf.get().toInt() and 0xff
             val sender = ByteArray(16).also { buf.get(it) }
             val msgId = ByteArray(16).also { buf.get(it) }
+            val destination = ByteArray(16).also { buf.get(it) }
+            val nextHop = ByteArray(16).also { buf.get(it) }
             val ttl = buf.get().toInt() and 0xff
             val plen = buf.short.toInt() and 0xffff
-            if (data.size < CQ.HEADER_SIZE + plen) return null
+            if (data.size != CQ.HEADER_SIZE + plen) return null
             val payload = ByteArray(plen).also { buf.get(it) }
-            return CQPacket(version, type, flags, sender, msgId, ttl, payload)
+            return CQPacket(version, type, flags, sender, msgId, destination, nextHop, ttl, payload)
         }
 
         fun make(
@@ -50,10 +63,17 @@ data class CQPacket(
             msgId: ByteArray = random16(),
             ttl: Int = CQ.TTL_DEFAULT,
             flags: Int = 0,
+            destination: ByteArray = broadcastAddress(),
+            nextHop: ByteArray = broadcastAddress(),
             payload: ByteArray,
-        ): CQPacket = CQPacket(CQ.VERSION, type, flags, sender, msgId, ttl, payload)
+        ): CQPacket = CQPacket(CQ.VERSION, type, flags, sender, msgId, destination, nextHop, ttl, payload)
 
         fun random16(): ByteArray = ByteArray(16).also { SecureRandom().nextBytes(it) }
+
+        fun broadcastAddress(): ByteArray = ByteArray(16)
+
+        fun isBroadcastAddress(address: ByteArray): Boolean =
+            address.size == 16 && address.all { it == 0.toByte() }
     }
 
     override fun equals(other: Any?): Boolean {
@@ -61,6 +81,7 @@ data class CQPacket(
         if (other !is CQPacket) return false
         return version == other.version && type == other.type && flags == other.flags &&
             sender.contentEquals(other.sender) && msgId.contentEquals(other.msgId) &&
+            destination.contentEquals(other.destination) && nextHop.contentEquals(other.nextHop) &&
             ttl == other.ttl && payload.contentEquals(other.payload)
     }
 
@@ -122,6 +143,7 @@ object AckPayload {
 
 object FragmentPayload {
     fun encode(index: Int, total: Int, data: ByteArray): ByteArray {
+        require(index in 0 until total && total in 1..CQ.MAX_FRAGMENT_COUNT)
         val buf = ByteBuffer.allocate(4 + data.size).order(ByteOrder.BIG_ENDIAN)
         buf.putShort(index.toShort())
         buf.putShort(total.toShort())
@@ -133,6 +155,7 @@ object FragmentPayload {
         if (data.size < 4) return null
         val index = ((data[0].toInt() and 0xff) shl 8) or (data[1].toInt() and 0xff)
         val total = ((data[2].toInt() and 0xff) shl 8) or (data[3].toInt() and 0xff)
+        if (total !in 1..CQ.MAX_FRAGMENT_COUNT || index !in 0 until total) return null
         return Triple(index, total, data.copyOfRange(4, data.size))
     }
 }
@@ -161,10 +184,10 @@ object MediaContainer {
         if (data.size < 8) return null
         val buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
         val tl = buf.int
-        if (data.size < 4 + tl + 4) return null
+        if (tl < 0 || tl > CQ.MAX_REASSEMBLY_BYTES || data.size < 4 + tl + 4) return null
         val thumb = ByteArray(tl).also { buf.get(it) }
         val dl = buf.int
-        if (data.size < 4 + tl + 4 + dl) return null
+        if (dl < 0 || dl > CQ.MAX_REASSEMBLY_BYTES || data.size != 4 + tl + 4 + dl) return null
         val body = ByteArray(dl).also { buf.get(it) }
         return thumb to body
     }

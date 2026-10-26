@@ -10,6 +10,9 @@ import androidx.core.app.NotificationCompat
 
 /** Keeps BLE central/peripheral alive while app is backgrounded. */
 class MeshForegroundService : Service() {
+    private var mesh: BleMeshService? = null
+    private var running = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -22,12 +25,47 @@ class MeshForegroundService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setOngoing(true)
             .build()
-        startForeground(42, n)
+        startForeground(NOTIFICATION_ID, n)
+        mesh = BleMeshService(this, object : BleMeshListener {
+            override fun onPacket(data: ByteArray) = Unit
+            override fun onDiscover(tempId: ByteArray) = Unit
+        })
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action ?: ACTION_START) {
+            ACTION_STOP -> {
+                stopMesh()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelfResult(startId)
+                return START_NOT_STICKY
+            }
+            ACTION_START -> startMesh()
+        }
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        stopMesh()
+        super.onDestroy()
+    }
+
+    private fun startMesh() {
+        if (running) return
+        running = true
+        mesh?.start()
+    }
+
+    private fun stopMesh() {
+        if (!running) return
+        running = false
+        mesh?.stop()
+    }
 
     companion object {
         const val CHANNEL = "cqchat_mesh_fg"
+        const val ACTION_START = "com.cqchat.app.transport.START_MESH"
+        const val ACTION_STOP = "com.cqchat.app.transport.STOP_MESH"
+        private const val NOTIFICATION_ID = 42
     }
 }

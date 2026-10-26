@@ -10,7 +10,7 @@ import os
 import struct
 from pathlib import Path
 
-VERSION = 0x01
+VERSION = 0x02
 
 TYPE_DISCOVER = 0x01
 TYPE_BROADCAST = 0x02
@@ -23,7 +23,20 @@ TYPE_FRAGMENT = 0x08
 
 FLAG_NEEDS_ACK = 0x01
 
-HEADER_SIZE = 38
+HEADER_SIZE = 70
+AD_PREFIX = b"CQchat packet AD v2"
+
+
+def associated_data(packet: dict) -> bytes:
+    """Canonical Noise transport AD; TTL and payload are intentionally absent."""
+    return (
+        AD_PREFIX
+        + bytes([packet["version"], packet["type"], packet["flags"]])
+        + packet["sender"]
+        + packet["msg_id"]
+        + packet["destination"]
+        + packet["next_hop"]
+    )
 
 
 def hkdf_sha256(ikm: bytes, info: bytes, length: int = 32, salt: bytes = b"") -> bytes:
@@ -52,19 +65,25 @@ def encode_header(
     ttl: int,
     payload: bytes,
     flags: int = 0,
+    destination: bytes = bytes(16),
+    next_hop: bytes = bytes(16),
     version: int = VERSION,
 ) -> bytes:
     assert len(sender) == 16
     assert len(msg_id) == 16
+    assert len(destination) == 16
+    assert len(next_hop) == 16
     assert 0 <= ttl <= 255
     assert len(payload) <= 0xFFFF
     return struct.pack(
-        "!BBB16s16sBH",
+        "!BBB16s16s16s16sBH",
         version,
         typ,
         flags,
         sender,
         msg_id,
+        destination,
+        next_hop,
         ttl,
         len(payload),
     ) + payload
@@ -73,17 +92,19 @@ def encode_header(
 def decode_header(data: bytes) -> dict:
     if len(data) < HEADER_SIZE:
         raise ValueError("short packet")
-    version, typ, flags, sender, msg_id, ttl, plen = struct.unpack(
-        "!BBB16s16sBH", data[:HEADER_SIZE]
+    version, typ, flags, sender, msg_id, destination, next_hop, ttl, plen = struct.unpack(
+        "!BBB16s16s16s16sBH", data[:HEADER_SIZE]
     )
-    if len(data) < HEADER_SIZE + plen:
-        raise ValueError("truncated payload")
+    if len(data) != HEADER_SIZE + plen:
+        raise ValueError("invalid payload length")
     return {
         "version": version,
         "type": typ,
         "flags": flags,
         "sender": sender,
         "msg_id": msg_id,
+        "destination": destination,
+        "next_hop": next_hop,
         "ttl": ttl,
         "payload": data[HEADER_SIZE : HEADER_SIZE + plen],
     }
@@ -113,13 +134,23 @@ def encode_fragment_payload(index: int, total: int, data: bytes) -> bytes:
 
 def fragment_packet(raw: bytes, msg_id: bytes, sender: bytes, ttl: int, chunk: int) -> list[bytes]:
     """Split a full encoded packet into FRAGMENT packets sharing msg_id."""
+    original = decode_header(raw)
+    assert original["sender"] == sender and original["msg_id"] == msg_id
     total = (len(raw) + chunk - 1) // chunk
     out = []
     for i in range(total):
         piece = raw[i * chunk : (i + 1) * chunk]
         payload = encode_fragment_payload(i, total, piece)
         out.append(
-            encode_header(TYPE_FRAGMENT, sender, msg_id, ttl, payload)
+            encode_header(
+                TYPE_FRAGMENT,
+                sender,
+                msg_id,
+                ttl,
+                payload,
+                destination=original["destination"],
+                next_hop=original["next_hop"],
+            )
         )
     return out
 

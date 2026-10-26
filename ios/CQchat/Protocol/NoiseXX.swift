@@ -3,9 +3,11 @@ import CryptoKit
 
 enum NoiseError: Error {
     case invalidState
+    case invalidKey
     case shortMessage
     case handshakeIncomplete
     case decryptFailed
+    case nonceExhausted
 }
 
 /// Noise_XX_25519_ChaChaPoly_SHA256 — must match Android `NoiseXX` byte-for-byte.
@@ -76,7 +78,7 @@ final class NoiseXX {
         mixHash(reRaw)
 
         // ee
-        mixKey(Data(try e.sharedSecretFromKeyAgreement(with: re)))
+        mixKey(try Self.checkedSharedSecret(privateKey: e, publicKey: re))
 
         // s
         let encS = message.subdata(in: 32..<80)
@@ -86,7 +88,7 @@ final class NoiseXX {
 
         // es = DH(e, rs)
         let rs = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: plainS)
-        mixKey(Data(try e.sharedSecretFromKeyAgreement(with: rs)))
+        mixKey(try Self.checkedSharedSecret(privateKey: e, publicKey: rs))
 
         if message.count == 80 { return Data() }
         let encP = message.subdata(in: 80..<message.count)
@@ -106,7 +108,7 @@ final class NoiseXX {
         mixHash(encS)
 
         // se = DH(s, re)
-        mixKey(Data(try staticKey.sharedSecretFromKeyAgreement(with: re)))
+        mixKey(try Self.checkedSharedSecret(privateKey: staticKey, publicKey: re))
 
         let encP = try handshakeCipher!.encrypt(plaintext: payload, ad: h)
         mixHash(encP)
@@ -142,7 +144,7 @@ final class NoiseXX {
         mixHash(e.publicKey.rawRepresentation)
 
         // ee
-        mixKey(Data(try e.sharedSecretFromKeyAgreement(with: re)))
+        mixKey(try Self.checkedSharedSecret(privateKey: e, publicKey: re))
 
         // s
         let encS = try handshakeCipher!.encrypt(
@@ -152,7 +154,7 @@ final class NoiseXX {
         msg.append(encS)
 
         // es = DH(s, re)
-        mixKey(Data(try staticKey.sharedSecretFromKeyAgreement(with: re)))
+        mixKey(try Self.checkedSharedSecret(privateKey: staticKey, publicKey: re))
 
         let encP = try handshakeCipher!.encrypt(plaintext: payload, ad: h)
         mixHash(encP)
@@ -172,7 +174,7 @@ final class NoiseXX {
 
         // se = DH(e, rs)  (responder ephemeral × initiator static)
         let rs = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: plainS)
-        mixKey(Data(try e.sharedSecretFromKeyAgreement(with: rs)))
+        mixKey(try Self.checkedSharedSecret(privateKey: e, publicKey: rs))
 
         let payload: Data
         if message.count == 48 {
@@ -188,17 +190,52 @@ final class NoiseXX {
 
     // MARK: Transport (shared across BLE + TCP)
 
-    func encrypt(_ plaintext: Data) throws -> Data {
+    func encrypt(_ plaintext: Data, associatedData: Data = Data()) throws -> Data {
         guard let c = sendCipher else { throw NoiseError.handshakeIncomplete }
-        return try c.encrypt(plaintext: plaintext, ad: Data())
+        return try c.encrypt(plaintext: plaintext, ad: associatedData)
     }
 
-    func decrypt(_ ciphertext: Data) throws -> Data {
+    func decrypt(_ ciphertext: Data, associatedData: Data = Data()) throws -> Data {
         guard let c = recvCipher else { throw NoiseError.handshakeIncomplete }
-        return try c.decrypt(ciphertext: ciphertext, ad: Data())
+        return try c.decrypt(ciphertext: ciphertext, ad: associatedData)
     }
 
     // MARK: Internals
+
+    /// Cross-platform X25519 validation shared by the handshake and tests.
+    /// CryptoKit may reject low-order points itself; normalize such failures
+    /// to NoiseError.invalidKey for parity with Android.
+    static func checkedSharedSecret(
+        privateKey: Curve25519.KeyAgreement.PrivateKey,
+        publicKeyRawRepresentation: Data,
+    ) throws -> Data {
+        guard publicKeyRawRepresentation.count == 32 else { throw NoiseError.invalidKey }
+        do {
+            let publicKey = try Curve25519.KeyAgreement.PublicKey(
+                rawRepresentation: publicKeyRawRepresentation
+            )
+            return try checkedSharedSecret(privateKey: privateKey, publicKey: publicKey)
+        } catch let error as NoiseError {
+            throw error
+        } catch {
+            throw NoiseError.invalidKey
+        }
+    }
+
+    private static func checkedSharedSecret(
+        privateKey: Curve25519.KeyAgreement.PrivateKey,
+        publicKey: Curve25519.KeyAgreement.PublicKey,
+    ) throws -> Data {
+        do {
+            let secret = Data(try privateKey.sharedSecretFromKeyAgreement(with: publicKey))
+            guard secret.contains(where: { $0 != 0 }) else { throw NoiseError.invalidKey }
+            return secret
+        } catch let error as NoiseError {
+            throw error
+        } catch {
+            throw NoiseError.invalidKey
+        }
+    }
 
     private func mixHash(_ data: Data) {
         h = Data(SHA256.hash(data: h + data))
@@ -229,35 +266,59 @@ final class NoiseXX {
 final class CipherState {
     private let key: SymmetricKey
     private var n: UInt64 = 0
+    private let lock = NSLock()
 
     init(key: SymmetricKey) { self.key = key }
 
     func encrypt(plaintext: Data, ad: Data) throws -> Data {
-        let nonce = Self.noiseNonce(n)
-        n += 1
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard n < UInt64.max else { throw NoiseError.nonceExhausted }
+        let candidate = n
+        let nonce = Self.noiseNonce(candidate)
         let sealed = try ChaChaPoly.seal(
             plaintext,
             using: key,
             nonce: try ChaChaPoly.Nonce(data: nonce),
             authenticating: ad
         )
+
+        // Commit only after the AEAD operation succeeds. If seal throws,
+        // the same nonce remains available and no counter gap is created.
+        n = candidate + 1
         return sealed.ciphertext + sealed.tag
     }
 
     func decrypt(ciphertext: Data, ad: Data) throws -> Data {
-        guard ciphertext.count >= 16 else { throw NoiseError.decryptFailed }
-        let nonce = Self.noiseNonce(n)
-        n += 1
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard n < UInt64.max, ciphertext.count >= 16 else {
+            throw ciphertext.count < 16 ? NoiseError.decryptFailed : NoiseError.nonceExhausted
+        }
+
+        let candidate = n
+        let nonce = Self.noiseNonce(candidate)
         let tag = Data(ciphertext.suffix(16))
         let ct = Data(ciphertext.prefix(ciphertext.count - 16))
-        let box = try ChaChaPoly.SealedBox(
-            nonce: try ChaChaPoly.Nonce(data: nonce),
-            ciphertext: ct,
-            tag: tag
-        )
+
         do {
-            return try ChaChaPoly.open(box, using: key, authenticating: ad)
+            let box = try ChaChaPoly.SealedBox(
+                nonce: try ChaChaPoly.Nonce(data: nonce),
+                ciphertext: ct,
+                tag: tag
+            )
+            let plaintext = try ChaChaPoly.open(box, using: key, authenticating: ad)
+
+            // Commit only after authentication succeeds. In particular, an
+            // invalid tag or AD must not consume the receive nonce.
+            n = candidate + 1
+            return plaintext
+        } catch let error as NoiseError {
+            throw error
         } catch {
+            // Keep n unchanged on every parse/authentication failure.
             throw NoiseError.decryptFailed
         }
     }
