@@ -16,6 +16,11 @@ class DedupCache {
     }
 
     @Synchronized
+    fun clear() {
+        map.clear()
+    }
+
+    @Synchronized
     private fun purge() {
         val cutoff = System.currentTimeMillis() - CQ.DEDUP_TTL_SECS * 1000
         map.entries.removeAll { it.value < cutoff }

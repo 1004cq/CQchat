@@ -16,6 +16,9 @@ enum CQ {
     static let imageMaxEdge: CGFloat = 1280
     static let imageJpegQuality: CGFloat = 0.7
     static let nearbyNotifyCooldown: TimeInterval = 600
+    static let favoriteNotifyCooldown: TimeInterval = 600
+    /// Peer marked unreachable if no BLE discovery / RX for this long.
+    static let peerUnreachableSecs: TimeInterval = 60
 
     static let serviceUUID = CBUUID(string: "C1C10001-C1C1-4000-8000-00000000C1C1")
     static let inboxUUID = CBUUID(string: "C1C10002-C1C1-4000-8000-00000000C1C1")

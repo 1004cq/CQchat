@@ -42,6 +42,12 @@ data class ChatMessage(
     enum class Status { QUEUED, SENT, DELIVERED, FAILED, RECEIVED }
 }
 
+enum class PeerLinkPath(val label: String) {
+    BLE_DIRECT("蓝牙直连"),
+    MESH_RELAY("Mesh 中继"),
+    UNREACHABLE("不可达"),
+}
+
 data class Peer(
     var tempId: ByteArray,
     var fingerprint: ByteArray? = null,
@@ -49,6 +55,12 @@ data class Peer(
     var verified: Boolean = false,
     var lastSeen: Long = System.currentTimeMillis(),
     var pathHint: String = "BLE",
+    var linkPath: PeerLinkPath = PeerLinkPath.UNREACHABLE,
+    var bleDirect: Boolean = false,
+    var lastRxTtl: Int? = null,
+    var encrypted: Boolean = false,
+    var cryptoFailed: Boolean = false,
+    var favorite: Boolean = false,
 )
 
 class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, HotspotListener {
@@ -62,12 +74,15 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         private set
     var transportHint by mutableStateOf("未开启附近模式")
         private set
+    var identityRevision by mutableStateOf(0)
+        private set
 
-    private val sessions = SessionManager(identity.x25519Private)
+    private var sessions = SessionManager(identity.x25519Private)
     private val dedup = DedupCache()
     private val pending = PendingOutbound()
     private val notifier = LocalNotifier(app)
     private val nearbyCooldown = HashMap<String, Long>()
+    private val favoriteCooldown = HashMap<String, Long>()
     private val handler = Handler(Looper.getMainLooper())
 
     private var ble: BleMeshService? = null
@@ -80,6 +95,38 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         }
     }
 
+    private val staleTick = object : Runnable {
+        override fun run() {
+            refreshStalePeers()
+            handler.postDelayed(this, 15_000)
+        }
+    }
+
+    /** Wipe identity_seed, sessions, messages; mint a new identity; refresh UI. */
+    fun emergencyWipe() {
+        val wasNearby = nearbyMode
+        if (wasNearby) setNearbyEnabled(false)
+        publicMessages.clear()
+        privateMessages.clear()
+        peers.clear()
+        pendingMedia.clear()
+        pending.clear()
+        dedup.clear()
+        nearbyCooldown.clear()
+        favoriteCooldown.clear()
+        sessions.clear()
+        identity.wipeAndRegenerate()
+        sessions = SessionManager(identity.x25519Private)
+        identityRevision++
+        if (wasNearby) setNearbyEnabled(true)
+    }
+
+    fun setFavorite(on: Boolean, fp: ByteArray) {
+        identity.setFavorite(on, fp)
+        val i = peers.indexOfFirst { it.fingerprint?.contentEquals(fp) == true }
+        if (i >= 0) peers[i] = peers[i].copy(favorite = on)
+    }
+
     fun setNearbyEnabled(on: Boolean) {
         if (on == nearbyMode) return
         nearbyMode = on
@@ -88,8 +135,10 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             startMesh()
             transportHint = "附近模式 · BLE"
             handler.post(retryTick)
+            handler.post(staleTick)
         } else {
             handler.removeCallbacks(retryTick)
+            handler.removeCallbacks(staleTick)
             stopMesh()
             MeshForegroundService.stop(getApplication())
             transportHint = "附近模式已关闭"
@@ -109,6 +158,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
 
     override fun onCleared() {
         handler.removeCallbacks(retryTick)
+        handler.removeCallbacks(staleTick)
         stopMesh()
         MeshForegroundService.stop(getApplication())
     }
@@ -306,8 +356,58 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         transportHint = if (tcp?.hasPeers == true) "附近模式 · BLE/Wi‑Fi" else "附近模式 · BLE"
     }
 
-    private fun pathFor(@Suppress("UNUSED_PARAMETER") fp: ByteArray): String =
-        if (tcp?.hasPeers == true) "Wi‑Fi 局域网" else "直连 BLE"
+    private fun pathFor(fp: ByteArray): String {
+        val peer = peers.firstOrNull {
+            it.fingerprint?.contentEquals(fp) == true || it.tempId.contentEquals(fp)
+        }
+        return peer?.linkPath?.label
+            ?: if (tcp?.hasPeers == true) "Wi‑Fi 局域网" else PeerLinkPath.BLE_DIRECT.label
+    }
+
+    private fun noteRx(tempId: ByteArray, ttl: Int) {
+        val i = peers.indexOfFirst { it.tempId.contentEquals(tempId) }
+        if (i < 0) return
+        val p = peers[i]
+        val bleDirect = if (ttl >= CQ.TTL_DEFAULT) true else p.bleDirect
+        val link = when {
+            ttl >= CQ.TTL_DEFAULT || bleDirect -> PeerLinkPath.BLE_DIRECT
+            else -> PeerLinkPath.MESH_RELAY
+        }
+        peers[i] = p.copy(
+            lastRxTtl = ttl,
+            lastSeen = System.currentTimeMillis(),
+            bleDirect = bleDirect,
+            linkPath = link,
+            pathHint = link.label,
+        )
+        refreshCryptoStatus(i)
+    }
+
+    private fun refreshCryptoStatus(i: Int) {
+        if (i !in peers.indices) return
+        val p = peers[i]
+        val key = p.fingerprint ?: sessions.keyForTemp(p.tempId)
+        val s = key?.let { sessions.session(it) }
+        peers[i] = p.copy(
+            encrypted = s != null && !s.failed,
+            cryptoFailed = s?.failed == true,
+        )
+    }
+
+    private fun refreshStalePeers() {
+        val now = System.currentTimeMillis()
+        for (i in peers.indices) {
+            val p = peers[i]
+            if (now - p.lastSeen > CQ.PEER_UNREACHABLE_MS) {
+                peers[i] = p.copy(
+                    bleDirect = false,
+                    linkPath = PeerLinkPath.UNREACHABLE,
+                    pathHint = PeerLinkPath.UNREACHABLE.label,
+                )
+            }
+            refreshCryptoStatus(i)
+        }
+    }
 
     private fun appendPrivate(fp: ByteArray, msg: ChatMessage) {
         val key = fp.toHex()
@@ -370,9 +470,8 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     override fun onPacket(data: ByteArray) = handlePacket(data)
 
     override fun onDiscover(tempId: ByteArray) {
-        // Re-bind known sessions if we can match later via Hello; for now upsert peer
         sessions.keyForTemp(tempId)?.let { sessions.bindTempId(tempId, it) }
-        upsertPeer(tempId, null, "附近")
+        upsertPeer(tempId, null, "附近", bleDirect = true)
     }
 
     override fun onPeersChanged(count: Int) {
@@ -383,6 +482,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         val pkt = CQPacket.decode(data) ?: return
         if (pkt.version != CQ.VERSION) return
         if (pkt.type != CQ.Type.ACK && dedup.seen(pkt.msgId)) return
+        noteRx(pkt.sender, pkt.ttl)
         when (pkt.type) {
             CQ.Type.BROADCAST -> handleBroadcast(pkt)
             CQ.Type.HANDSHAKE -> handleHandshake(pkt)
@@ -474,6 +574,9 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         } catch (e: Exception) {
             sessions.markFailed(key)
             Log.w("CQchat", "noise decrypt failed → session reset needed")
+            peers.indexOfFirst { it.tempId.contentEquals(pkt.sender) }.takeIf { it >= 0 }?.let {
+                refreshCryptoStatus(it)
+            }
             return
         }
         val (ct, body) = PrivatePlaintext.decode(plain) ?: return
@@ -535,27 +638,48 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         }
     }
 
-    private fun upsertPeer(tempId: ByteArray, fingerprint: ByteArray?, nickname: String) {
+    private fun upsertPeer(
+        tempId: ByteArray,
+        fingerprint: ByteArray?,
+        nickname: String,
+        bleDirect: Boolean = false,
+    ) {
         val idx = peers.indexOfFirst {
             it.tempId.contentEquals(tempId) ||
                 (fingerprint != null && it.fingerprint?.contentEquals(fingerprint) == true)
         }
         if (idx >= 0) {
             val p = peers[idx]
+            val wasSeen = p.lastSeen
+            val fp = fingerprint ?: p.fingerprint
+            val link = when {
+                bleDirect || p.bleDirect -> PeerLinkPath.BLE_DIRECT
+                p.linkPath == PeerLinkPath.UNREACHABLE -> PeerLinkPath.MESH_RELAY
+                else -> p.linkPath
+            }
             peers[idx] = p.copy(
                 tempId = tempId,
-                fingerprint = fingerprint ?: p.fingerprint,
+                fingerprint = fp,
                 nickname = nickname,
                 lastSeen = System.currentTimeMillis(),
-                verified = (fingerprint ?: p.fingerprint)?.let { identity.isVerified(it) } ?: false,
-                pathHint = pathFor(fingerprint ?: p.fingerprint ?: tempId),
+                verified = fp?.let { identity.isVerified(it) } ?: false,
+                favorite = fp?.let { identity.isFavorite(it) } ?: false,
+                bleDirect = bleDirect || p.bleDirect,
+                linkPath = link,
+                pathHint = link.label,
             )
+            refreshCryptoStatus(idx)
+            maybeNotifyFavorite(fp, nickname, wasSeen)
         } else {
+            val link = if (bleDirect) PeerLinkPath.BLE_DIRECT else PeerLinkPath.UNREACHABLE
             peers.add(
                 Peer(
                     tempId, fingerprint, nickname,
                     verified = fingerprint?.let { identity.isVerified(it) } ?: false,
-                    pathHint = "BLE",
+                    favorite = fingerprint?.let { identity.isFavorite(it) } ?: false,
+                    pathHint = link.label,
+                    linkPath = link,
+                    bleDirect = bleDirect,
                 )
             )
             fingerprint?.let { fp ->
@@ -564,8 +688,21 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                     nearbyCooldown[fp.toHex()] = System.currentTimeMillis()
                     notifier.nearby(nickname)
                 }
+                maybeNotifyFavorite(fp, nickname, 0L)
             }
+            refreshCryptoStatus(peers.lastIndex)
         }
         fingerprint?.let { sessions.bindTempId(tempId, it) }
+    }
+
+    private fun maybeNotifyFavorite(fp: ByteArray?, nickname: String, previouslySeen: Long) {
+        if (fp == null || !identity.isFavorite(fp)) return
+        val now = System.currentTimeMillis()
+        val stale = previouslySeen == 0L || now - previouslySeen > CQ.PEER_UNREACHABLE_MS
+        if (!stale) return
+        val last = favoriteCooldown[fp.toHex()] ?: 0L
+        if (now - last < CQ.FAVORITE_NOTIFY_COOLDOWN_MS) return
+        favoriteCooldown[fp.toHex()] = now
+        notifier.favoriteNearby(nickname)
     }
 }

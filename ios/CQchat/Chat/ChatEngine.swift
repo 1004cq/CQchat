@@ -21,6 +21,12 @@ struct ChatMessage: Identifiable, Equatable {
     let ts: Date
 }
 
+enum PeerLinkPath: String, Equatable {
+    case bleDirect = "蓝牙直连"
+    case meshRelay = "Mesh 中继"
+    case unreachable = "不可达"
+}
+
 struct Peer: Identifiable, Equatable {
     var id: Data { fingerprint ?? tempId }
     var tempId: Data
@@ -29,6 +35,12 @@ struct Peer: Identifiable, Equatable {
     var verified: Bool
     var lastSeen: Date
     var pathHint: String
+    var linkPath: PeerLinkPath = .unreachable
+    var bleDirect: Bool = false
+    var lastRxTtl: UInt8? = nil
+    var encrypted: Bool = false
+    var cryptoFailed: Bool = false
+    var favorite: Bool = false
 }
 
 @MainActor
@@ -41,18 +53,21 @@ final class ChatEngine: ObservableObject {
     @Published var nickname: String = IdentityKeys.nickname
     @Published var nearbyMode = false
     @Published var transportHint = "未开启附近模式"
+    @Published var identityEpoch: Int = 0
 
     let ble = BleMeshService()
     let tcp = HotspotTcpService()
-    private let sessions: SessionManager
-    private let x25519: Curve25519.KeyAgreement.PrivateKey
-    private let ed25519: Curve25519.Signing.PrivateKey
-    private let myFingerprint: Data
+    private var sessions: SessionManager
+    private var x25519: Curve25519.KeyAgreement.PrivateKey
+    private var ed25519: Curve25519.Signing.PrivateKey
+    private var myFingerprint: Data
     private let dedup = DedupCache()
     private let notifier = LocalNotifier()
     private var nearbyCooldown: [Data: Date] = [:]
+    private var favoriteCooldown: [Data: Date] = [:]
     private var awaitingAck: [Data: (wire: Data, dest: Data, tries: Int, created: Date, isMedia: Bool)] = [:]
     private var retryTimer: Timer?
+    private var staleTimer: Timer?
 
     init() throws {
         let keys = try IdentityKeys.loadOrCreate()
@@ -69,6 +84,43 @@ final class ChatEngine: ObservableObject {
 
     var qrPayload: String { IdentityKeys.qrString(fingerprint: myFingerprint) }
 
+    /// Wipe identity_seed, sessions, messages; mint a new identity; refresh UI.
+    func emergencyWipe() {
+        let wasNearby = nearbyMode
+        if wasNearby { setNearbyMode(false) }
+        publicMessages = []
+        privateMessages = [:]
+        peers = []
+        pendingMedia = []
+        awaitingAck = [:]
+        nearbyCooldown = [:]
+        favoriteCooldown = [:]
+        dedup.clear()
+        sessions.clear()
+        do {
+            let keys = try IdentityKeys.wipeAndRegenerate()
+            x25519 = keys.x25519
+            ed25519 = keys.ed25519
+            myFingerprint = IdentityKeys.fingerprint(
+                ed25519Public: keys.ed25519.publicKey.rawRepresentation
+            )
+            myFingerprintHex = myFingerprint.hex
+            nickname = IdentityKeys.nickname
+            sessions = SessionManager(staticKey: keys.x25519)
+            identityEpoch += 1
+        } catch {
+            // Keychain failure: still leave local state wiped.
+        }
+        if wasNearby { setNearbyMode(true) }
+    }
+
+    func setFavorite(_ on: Bool, fingerprint fp: Data) {
+        IdentityKeys.setFavorite(on, fingerprint: fp)
+        if let i = peers.firstIndex(where: { $0.fingerprint == fp }) {
+            peers[i].favorite = on
+        }
+    }
+
     func setNearbyMode(_ on: Bool) {
         guard on != nearbyMode else { return }
         nearbyMode = on
@@ -79,10 +131,15 @@ final class ChatEngine: ObservableObject {
             retryTimer = Timer.scheduledTimer(withTimeInterval: CQ.ackRetrySecs, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.tickRetries() }
             }
+            staleTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.refreshStalePeers() }
+            }
             notifier.requestPermission()
         } else {
             retryTimer?.invalidate()
             retryTimer = nil
+            staleTimer?.invalidate()
+            staleTimer = nil
             ble.stop()
             tcp.stop()
             transportHint = "附近模式已关闭"
@@ -269,7 +326,48 @@ final class ChatEngine: ObservableObject {
     }
 
     private func pathFor(_ fp: Data) -> String {
-        tcp.isLikelyOnLocalNetwork ? "Wi‑Fi 局域网" : "直连 BLE"
+        if let peer = peers.first(where: { $0.fingerprint == fp || $0.tempId == fp }) {
+            return peer.linkPath.rawValue
+        }
+        return tcp.isLikelyOnLocalNetwork ? "Wi‑Fi 局域网" : PeerLinkPath.bleDirect.rawValue
+    }
+
+    private func noteRx(tempId: Data, ttl: UInt8) {
+        guard let i = peers.firstIndex(where: { $0.tempId == tempId }) else { return }
+        peers[i].lastRxTtl = ttl
+        peers[i].lastSeen = Date()
+        if ttl >= CQ.ttlDefault {
+            peers[i].bleDirect = true
+            peers[i].linkPath = .bleDirect
+        } else if !peers[i].bleDirect {
+            peers[i].linkPath = .meshRelay
+        }
+        peers[i].pathHint = peers[i].linkPath.rawValue
+        refreshCryptoStatus(at: i)
+    }
+
+    private func refreshCryptoStatus(at i: Int) {
+        let p = peers[i]
+        let key = p.fingerprint ?? sessions.key(forTemp: p.tempId)
+        if let key, let s = sessions.session(for: key) {
+            peers[i].cryptoFailed = s.failed
+            peers[i].encrypted = !s.failed
+        } else {
+            peers[i].encrypted = false
+            peers[i].cryptoFailed = false
+        }
+    }
+
+    private func refreshStalePeers() {
+        let now = Date()
+        for i in peers.indices {
+            if now.timeIntervalSince(peers[i].lastSeen) > CQ.peerUnreachableSecs {
+                peers[i].bleDirect = false
+                peers[i].linkPath = .unreachable
+                peers[i].pathHint = PeerLinkPath.unreachable.rawValue
+            }
+            refreshCryptoStatus(at: i)
+        }
     }
 
     private func appendPrivate(_ msg: ChatMessage, fp: Data) {
@@ -327,6 +425,7 @@ final class ChatEngine: ObservableObject {
     private func handlePacket(_ data: Data) {
         guard let pkt = CQPacket.decode(data), pkt.version == CQ.version else { return }
         if pkt.type != CQ.PacketType.ack.rawValue, dedup.seen(pkt.msgId) { return }
+        noteRx(tempId: pkt.sender, ttl: pkt.ttl)
         switch CQ.PacketType(rawValue: pkt.type) {
         case .broadcast: handleBroadcast(pkt)
         case .handshake: handleHandshake(pkt)
@@ -405,7 +504,12 @@ final class ChatEngine: ObservableObject {
     private func handlePrivate(_ pkt: CQPacket) {
         guard let key = sessions.key(forTemp: pkt.sender) else { return }
         guard let plain = try? sessions.decrypt(from: key, ciphertext: pkt.payload),
-              let (ct, body) = PrivatePlaintext.decode(plain) else { return }
+              let (ct, body) = PrivatePlaintext.decode(plain) else {
+            if let i = peers.firstIndex(where: { $0.tempId == pkt.sender }) {
+                refreshCryptoStatus(at: i)
+            }
+            return
+        }
         let fp = sessions.session(for: key)?.identityFingerprint ?? key
         if pkt.flags & CQ.Flag.needsAck != 0 {
             let ack = CQPacket.make(type: .ack, sender: ble.currentTempId, payload: AckPayload.encode(ackMsgId: pkt.msgId))
@@ -451,21 +555,37 @@ final class ChatEngine: ObservableObject {
         }
     }
 
-    private func upsertPeer(tempId: Data, fingerprint: Data?, nickname: String) {
+    private func upsertPeer(tempId: Data, fingerprint: Data?, nickname: String, bleDirect: Bool = false) {
+        let fp = fingerprint
+        let verified = (fp ?? peers.first(where: { $0.tempId == tempId })?.fingerprint)
+            .map { IdentityKeys.isVerified(fingerprint: $0) } ?? false
+        let favorite = (fp ?? peers.first(where: { $0.tempId == tempId })?.fingerprint)
+            .map { IdentityKeys.isFavorite(fingerprint: $0) } ?? false
         if let i = peers.firstIndex(where: {
             $0.tempId == tempId || ($0.fingerprint != nil && $0.fingerprint == fingerprint)
         }) {
+            let wasSeen = peers[i].lastSeen
             peers[i].tempId = tempId
             if let fingerprint { peers[i].fingerprint = fingerprint }
             peers[i].nickname = nickname
             peers[i].lastSeen = Date()
-            peers[i].verified = fingerprint.map { IdentityKeys.isVerified(fingerprint: $0) } ?? false
-            peers[i].pathHint = pathFor(fingerprint ?? tempId)
+            peers[i].verified = verified
+            peers[i].favorite = favorite
+            if bleDirect {
+                peers[i].bleDirect = true
+                peers[i].linkPath = .bleDirect
+            } else if peers[i].linkPath == .unreachable {
+                peers[i].linkPath = peers[i].bleDirect ? .bleDirect : .meshRelay
+            }
+            peers[i].pathHint = peers[i].linkPath.rawValue
+            refreshCryptoStatus(at: i)
+            maybeNotifyFavorite(fp: peers[i].fingerprint, nickname: nickname, previouslySeen: wasSeen)
         } else {
+            let link: PeerLinkPath = bleDirect ? .bleDirect : .unreachable
             peers.append(Peer(
                 tempId: tempId, fingerprint: fingerprint, nickname: nickname,
-                verified: fingerprint.map { IdentityKeys.isVerified(fingerprint: $0) } ?? false,
-                lastSeen: Date(), pathHint: "BLE"
+                verified: verified, lastSeen: Date(), pathHint: link.rawValue,
+                linkPath: link, bleDirect: bleDirect, favorite: favorite
             ))
             if let fingerprint {
                 let last = nearbyCooldown[fingerprint] ?? .distantPast
@@ -473,11 +593,24 @@ final class ChatEngine: ObservableObject {
                     nearbyCooldown[fingerprint] = Date()
                     notifier.nearby(nickname)
                 }
+                maybeNotifyFavorite(fp: fingerprint, nickname: nickname, previouslySeen: .distantPast)
             }
+            refreshCryptoStatus(at: peers.count - 1)
         }
         if let fingerprint {
             sessions.bindTempId(tempId, toKey: fingerprint)
         }
+    }
+
+    private func maybeNotifyFavorite(fp: Data?, nickname: String, previouslySeen: Date) {
+        guard let fp, IdentityKeys.isFavorite(fingerprint: fp) else { return }
+        // Only when reappearing after being stale / first sighting of a favorite.
+        let stale = Date().timeIntervalSince(previouslySeen) > CQ.peerUnreachableSecs
+        guard stale || previouslySeen == .distantPast else { return }
+        let last = favoriteCooldown[fp] ?? .distantPast
+        guard Date().timeIntervalSince(last) >= CQ.favoriteNotifyCooldown else { return }
+        favoriteCooldown[fp] = Date()
+        notifier.favoriteNearby(nickname)
     }
 }
 
@@ -490,7 +623,7 @@ extension ChatEngine: BleMeshDelegate {
             if let key = sessions.key(forTemp: tempId) {
                 sessions.bindTempId(tempId, toKey: key)
             }
-            upsertPeer(tempId: tempId, fingerprint: nil, nickname: "附近")
+            upsertPeer(tempId: tempId, fingerprint: nil, nickname: "附近", bleDirect: true)
         }
     }
 }

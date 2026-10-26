@@ -97,6 +97,7 @@ final class SessionManager {
         s.nickname = name
         byKey[key] = s
         if let fp = s.identityFingerprint { byKey[fp] = s }
+        if let sid = s.noise.remoteSessionId { byKey[sid] = s }
     }
 
     func markFailed(_ key: Data) {
@@ -135,5 +136,12 @@ final class SessionManager {
     func key(forTemp tempId: Data) -> Data? {
         lock.lock(); defer { lock.unlock() }
         return tempToKey[tempId]
+    }
+
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        byKey.removeAll()
+        handshakeByTemp.removeAll()
+        tempToKey.removeAll()
     }
 }

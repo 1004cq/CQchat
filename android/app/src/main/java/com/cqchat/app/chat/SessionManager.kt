@@ -92,4 +92,11 @@ class SessionManager(private val staticPrivate: ByteArray) {
         s.noise.remoteSessionId?.let { byKey.remove(it.toHex()) }
         tempToKey.entries.removeAll { it.value == key.toHex() }
     }
+
+    @Synchronized
+    fun clear() {
+        byKey.clear()
+        handshakeByTemp.clear()
+        tempToKey.clear()
+    }
 }

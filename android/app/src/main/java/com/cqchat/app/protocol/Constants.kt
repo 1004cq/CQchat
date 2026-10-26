@@ -17,6 +17,9 @@ object CQ {
     const val IMAGE_MAX_EDGE: Int = 1280
     const val IMAGE_JPEG_QUALITY: Int = 70
     const val NEARBY_NOTIFY_COOLDOWN_MS: Long = 600_000
+    const val FAVORITE_NOTIFY_COOLDOWN_MS: Long = 600_000
+    /** Peer marked unreachable if no BLE discovery / RX for this long. */
+    const val PEER_UNREACHABLE_MS: Long = 60_000
     const val HEADER_SIZE: Int = 38
     const val QR_PREFIX: String = "cqchat:v1:"
 

@@ -22,4 +22,8 @@ final class LocalNotifier {
     func nearby(_ name: String) {
         message(title: "附近的人", body: "发现 \(name)")
     }
+
+    func favoriteNearby(_ name: String) {
+        message(title: "收藏的人出现了", body: name)
+    }
 }

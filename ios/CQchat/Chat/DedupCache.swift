@@ -21,6 +21,12 @@ final class DedupCache {
         return map[msgId] != nil
     }
 
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        map.removeAll()
+    }
+
     private func purgeLocked() {
         let cutoff = Date().addingTimeInterval(-CQ.dedupTtlSecs)
         map = map.filter { $0.value >= cutoff }

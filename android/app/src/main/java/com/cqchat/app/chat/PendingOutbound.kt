@@ -45,5 +45,9 @@ class PendingOutbound {
     fun allForDest(dest: ByteArray): List<Entry> =
         map.values.filter { it.destKey.contentEquals(dest) }
 
+    fun clear() {
+        map.clear()
+    }
+
     private fun ByteArray.toHexSafe(): String = joinToString("") { "%02x".format(it) }
 }
