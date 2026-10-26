@@ -4,6 +4,7 @@
 	classes = {};
 	objectVersion = 56;
 	objects = {
+		A7ED7DEF680D4768A5F9D5E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5542BB4FAE4A4E8B96D4EAC6 /* Assets.xcassets */; };
 		91776565B02D49F2B4E46D24 /* CQchatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6CACC1C90D64C7FA8D8E0FD /* CQchatApp.swift */; };
 		A448990546104162B858C265 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDBD2BA4D2A44ECB43D8376 /* Constants.swift */; };
 		893744A5A97840469D92B5A1 /* PacketCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FE2857391EC42A7BE64A8DB /* PacketCodec.swift */; };
@@ -21,6 +22,7 @@
 		F3B6F82F921C498C9A09A459 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04D2523874C433282BC3450 /* ContentView.swift */; };
 		153DA37188B7498BB6D5C4C4 /* QRViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9252CE68EEC54957BBE4D140 /* QRViews.swift */; };
 		AF11896114354E4AA20F62BE /* v1.json in Resources */ = {isa = PBXBuildFile; fileRef = 3F837588A4604C08B026A5B3 /* v1.json */; };
+		5542BB4FAE4A4E8B96D4EAC6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1BEC8F1D0BDA4DAAACB7833D /* CQchat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CQchat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B6CACC1C90D64C7FA8D8E0FD /* CQchatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CQchatApp.swift; sourceTree = "<group>"; };
 		1FDBD2BA4D2A44ECB43D8376 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
@@ -47,6 +49,7 @@
 				B0F5C2CEF16D4A09918E143B /* Chat */,
 				AAF3E29A14FB4EBE95356A71 /* Crypto */,
 				3468DC12E45B4560BD7D4973 /* Info.plist */,
+				5542BB4FAE4A4E8B96D4EAC6 /* Assets.xcassets */,
 				947D9670779E4D0583488ADB /* Media */,
 				D4516CAD3F92438C8F99868D /* Notifications */,
 				3DD1A4D1F7DB48BA91970450 /* Protocol */,
@@ -214,6 +217,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AF11896114354E4AA20F62BE /* v1.json in Resources */,
+				A7ED7DEF680D4768A5F9D5E6 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -259,6 +263,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				INFOPLIST_FILE = CQchat/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.1.0;
@@ -276,6 +281,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				INFOPLIST_FILE = CQchat/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.1.0;
