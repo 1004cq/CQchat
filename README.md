@@ -4,6 +4,8 @@
 
 Offline encrypted chat over Bluetooth mesh and WiFi hotspot.
 
+iOS 和 Android 必须用同一套协议。不能各写各的。
+
 ## 要求
 
 给附近的人用。关网能聊，私聊端到端，比 bitchat 好用：能传图和语音消息，身份能当面核对，消息少丢，广播不好追踪。
@@ -21,9 +23,24 @@ Offline encrypted chat over Bluetooth mesh and WiFi hotspot.
 
 人多能传远，靠的是中间有更多手机转发，不是某一台手机性能强。空地里几个人还是传不远。
 
+## 协议（两端共用）
+
+自定义二进制包，不走 JSON。
+
+| 字段 | 说明 |
+|---|---|
+| version | 协议版本 |
+| type | 广播 / 私聊 / 确认 / 同步 / 媒体 / 握手 |
+| sender | 临时标识或指纹 |
+| msg_id | 去重 |
+| ttl | 起始 7，每跳减 1 |
+| payload | 密文、签名广播或握手数据 |
+
+超过 MTU 分片，接收端按 `msg_id` 拼回。加密在会话层做完，传输层只搬密文。
+
 ## 身份
 
-首次启动在本地生成密钥对，不注册、不上传。
+首次启动本地生成密钥对，不注册、不上传。
 
 - 长期身份：X25519，放 Keychain / Keystore
 - 昵称：可改，不参与认证
@@ -32,17 +49,17 @@ Offline encrypted chat over Bluetooth mesh and WiFi hotspot.
 
 ## 加密
 
-私聊：Noise XX（X25519 + ChaCha20-Poly1305）。包小，适合蓝牙，第一次见面互相认证。
+私聊：Noise XX（X25519 + ChaCha20-Poly1305）。
 
 - 活会话有前向安全
 - 每条消息带 `msg_id` 和递增 nonce
 - 蓝牙和热点用同一会话密钥，不重新握手
 - 公频：Ed25519 签名，不加密
-- 以后若要更强前向安全，可再换 Double Ratchet。第一期不上
+- 第一期不上 Double Ratchet
 
 ## 防扫描
 
-- 广播标识每几分钟轮换，不挂固定 ID
+- 广播标识每几分钟轮换
 - 发现包只放临时标识和版本
 - 拒绝旧 nonce 和重复 `msg_id`
 - mDNS 不放身份，TCP 只送密文
@@ -60,11 +77,17 @@ Offline encrypted chat over Bluetooth mesh and WiFi hotspot.
 - 更大且热点可用：TCP 发
 - 否则进队列，界面显示等待，不假装已发出
 
+## 平台
+
+- iOS：Swift / SwiftUI，CoreBluetooth，Keychain。后台扫描和广播有限制
+- Android：Kotlin，BLE，Keystore。扫蓝牙通常要定位权限，后台用前台服务
+- 两端协议、密钥、包格式必须一致，才能互聊
+
 ## 蓝牙
 
 - 每台同时 central 和 peripheral
 - TTL 起始 7，去重 LRU 约 5 分钟
-- 密集时降低跳数，避免风暴
+- 密集时降低跳数
 - 直连约 10–50 米
 
 ## 热点
