@@ -79,9 +79,11 @@ iOS 和 Android 必须用同一套协议。不能各写各的。
 
 ## 平台
 
-- iOS：Swift / SwiftUI，CoreBluetooth，Keychain。后台扫描和广播有限制
-- Android：Kotlin，BLE，Keystore。扫蓝牙通常要定位权限，后台用前台服务
+- iOS：Swift / SwiftUI，CoreBluetooth，Keychain。后台扫描和广播有限制 → [`ios/`](ios/)
+- Android：Kotlin，BLE，Keystore。扫蓝牙通常要定位权限，后台用前台服务 → [`android/`](android/)
 - 两端协议、密钥、包格式必须一致，才能互聊
+- **二进制协议权威说明**（字段、端序、Noise、分片、媒体）：[`docs/PROTOCOL.md`](docs/PROTOCOL.md)
+- 共享测试向量：[`shared/test-vectors/v1.json`](shared/test-vectors/v1.json)
 
 ## 蓝牙
 

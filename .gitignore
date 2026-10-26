@@ -1,0 +1,22 @@
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.aab
+
+# iOS
+ios/DerivedData/
+ios/**/xcuserdata/
+*.xcuserstate
+ios/.swiftpm/
+
+# Misc
+.DS_Store
+*.log
+.idea/
+__pycache__/
+*.pyc

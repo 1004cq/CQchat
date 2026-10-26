@@ -1,0 +1,309 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		91776565B02D49F2B4E46D24 /* CQchatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6CACC1C90D64C7FA8D8E0FD /* CQchatApp.swift */; };
+		A448990546104162B858C265 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FDBD2BA4D2A44ECB43D8376 /* Constants.swift */; };
+		893744A5A97840469D92B5A1 /* PacketCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FE2857391EC42A7BE64A8DB /* PacketCodec.swift */; };
+		6A7F7ACDA3E84243ACB65D81 /* Fragmenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01703C05C1F24F6D9344A20A /* Fragmenter.swift */; };
+		7B80C06968B248CEBC8F8C66 /* NoiseXX.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DFAD3F53D144595B991958A /* NoiseXX.swift */; };
+		8B9CFFF8ED5247BBB8B4A7C0 /* IdentityKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FFAA5F64FC54B1EB1055279 /* IdentityKeys.swift */; };
+		E2CFD684F962410C87BBA1AB /* DedupCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C12FAA62BFE428092DCB7C3 /* DedupCache.swift */; };
+		F2F99DBA7C224E6FBB16B3DD /* SessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C68C47BFA654FC99076646B /* SessionManager.swift */; };
+		2563964010294EAEB37AC605 /* ChatEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3AC5D9D725B4A2598DC22BF /* ChatEngine.swift */; };
+		99693D6BA94C4591B94B5696 /* ImageCompressor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C862217C014EA0B2A15D8A /* ImageCompressor.swift */; };
+		A4BCEA5770894F7A84273CAA /* OpusVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05C9F0741BA3491C8E37BF9F /* OpusVoice.swift */; };
+		E7FBACC1B0EF4B2FAB8BD33C /* BleMeshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0C4D2F344F46EB8549642D /* BleMeshService.swift */; };
+		FABE2FA0E09B461785FF84A4 /* HotspotTcpService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C32189E08F45D1916FFCE7 /* HotspotTcpService.swift */; };
+		CD47D09C27B941BBAC5E6181 /* LocalNotifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = D717F043DF524506A4D256A0 /* LocalNotifier.swift */; };
+		F3B6F82F921C498C9A09A459 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04D2523874C433282BC3450 /* ContentView.swift */; };
+		153DA37188B7498BB6D5C4C4 /* QRViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9252CE68EEC54957BBE4D140 /* QRViews.swift */; };
+		AF11896114354E4AA20F62BE /* v1.json in Resources */ = {isa = PBXBuildFile; fileRef = 3F837588A4604C08B026A5B3 /* v1.json */; };
+		1BEC8F1D0BDA4DAAACB7833D /* CQchat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CQchat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B6CACC1C90D64C7FA8D8E0FD /* CQchatApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CQchatApp.swift; sourceTree = "<group>"; };
+		1FDBD2BA4D2A44ECB43D8376 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		4FE2857391EC42A7BE64A8DB /* PacketCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketCodec.swift; sourceTree = "<group>"; };
+		01703C05C1F24F6D9344A20A /* Fragmenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fragmenter.swift; sourceTree = "<group>"; };
+		6DFAD3F53D144595B991958A /* NoiseXX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoiseXX.swift; sourceTree = "<group>"; };
+		3FFAA5F64FC54B1EB1055279 /* IdentityKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityKeys.swift; sourceTree = "<group>"; };
+		0C12FAA62BFE428092DCB7C3 /* DedupCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DedupCache.swift; sourceTree = "<group>"; };
+		6C68C47BFA654FC99076646B /* SessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionManager.swift; sourceTree = "<group>"; };
+		C3AC5D9D725B4A2598DC22BF /* ChatEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatEngine.swift; sourceTree = "<group>"; };
+		99C862217C014EA0B2A15D8A /* ImageCompressor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageCompressor.swift; sourceTree = "<group>"; };
+		05C9F0741BA3491C8E37BF9F /* OpusVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpusVoice.swift; sourceTree = "<group>"; };
+		FE0C4D2F344F46EB8549642D /* BleMeshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleMeshService.swift; sourceTree = "<group>"; };
+		14C32189E08F45D1916FFCE7 /* HotspotTcpService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotspotTcpService.swift; sourceTree = "<group>"; };
+		D717F043DF524506A4D256A0 /* LocalNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifier.swift; sourceTree = "<group>"; };
+		C04D2523874C433282BC3450 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		9252CE68EEC54957BBE4D140 /* QRViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRViews.swift; sourceTree = "<group>"; };
+		3F837588A4604C08B026A5B3 /* v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = v1.json; sourceTree = "<group>"; };
+		3468DC12E45B4560BD7D4973 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		EF09454C25C74CEDBD2AF8E6 /* CQchat */ = {
+			isa = PBXGroup;
+			children = (
+				B6CACC1C90D64C7FA8D8E0FD /* CQchatApp.swift */,
+				B0F5C2CEF16D4A09918E143B /* Chat */,
+				AAF3E29A14FB4EBE95356A71 /* Crypto */,
+				3468DC12E45B4560BD7D4973 /* Info.plist */,
+				947D9670779E4D0583488ADB /* Media */,
+				D4516CAD3F92438C8F99868D /* Notifications */,
+				3DD1A4D1F7DB48BA91970450 /* Protocol */,
+				6EDD02BD809A4A5299B40CC8 /* Resources */,
+				D0997930A82C44FAB89EBF11 /* Transport */,
+				E8F23CF9A9194C52BCBF4584 /* UI */,
+			);
+			path = CQchat;
+			sourceTree = "<group>";
+		};
+		3DD1A4D1F7DB48BA91970450 /* Protocol */ = {
+			isa = PBXGroup;
+			children = (
+				1FDBD2BA4D2A44ECB43D8376 /* Constants.swift */,
+				01703C05C1F24F6D9344A20A /* Fragmenter.swift */,
+				6DFAD3F53D144595B991958A /* NoiseXX.swift */,
+				4FE2857391EC42A7BE64A8DB /* PacketCodec.swift */,
+			);
+			path = Protocol;
+			sourceTree = "<group>";
+		};
+		AAF3E29A14FB4EBE95356A71 /* Crypto */ = {
+			isa = PBXGroup;
+			children = (
+				3FFAA5F64FC54B1EB1055279 /* IdentityKeys.swift */,
+			);
+			path = Crypto;
+			sourceTree = "<group>";
+		};
+		B0F5C2CEF16D4A09918E143B /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				C3AC5D9D725B4A2598DC22BF /* ChatEngine.swift */,
+				0C12FAA62BFE428092DCB7C3 /* DedupCache.swift */,
+				6C68C47BFA654FC99076646B /* SessionManager.swift */,
+			);
+			path = Chat;
+			sourceTree = "<group>";
+		};
+		947D9670779E4D0583488ADB /* Media */ = {
+			isa = PBXGroup;
+			children = (
+				99C862217C014EA0B2A15D8A /* ImageCompressor.swift */,
+				05C9F0741BA3491C8E37BF9F /* OpusVoice.swift */,
+			);
+			path = Media;
+			sourceTree = "<group>";
+		};
+		D0997930A82C44FAB89EBF11 /* Transport */ = {
+			isa = PBXGroup;
+			children = (
+				FE0C4D2F344F46EB8549642D /* BleMeshService.swift */,
+				14C32189E08F45D1916FFCE7 /* HotspotTcpService.swift */,
+			);
+			path = Transport;
+			sourceTree = "<group>";
+		};
+		D4516CAD3F92438C8F99868D /* Notifications */ = {
+			isa = PBXGroup;
+			children = (
+				D717F043DF524506A4D256A0 /* LocalNotifier.swift */,
+			);
+			path = Notifications;
+			sourceTree = "<group>";
+		};
+		E8F23CF9A9194C52BCBF4584 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				C04D2523874C433282BC3450 /* ContentView.swift */,
+				9252CE68EEC54957BBE4D140 /* QRViews.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		6EDD02BD809A4A5299B40CC8 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				3F837588A4604C08B026A5B3 /* v1.json */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		7EAC78BF468448AE94A53704 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1BEC8F1D0BDA4DAAACB7833D /* CQchat.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		0F2AC08B4B1D46F089856BF4 = {
+			isa = PBXGroup;
+			children = (
+				EF09454C25C74CEDBD2AF8E6 /* CQchat */,
+				7EAC78BF468448AE94A53704 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C88948B2CF2044BAAB163150 /* CQchat */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 53A8F36BB98742418AADACBD /* Build configuration list for PBXNativeTarget "CQchat" */;
+			buildPhases = (
+				432FF330083C45DE8C04F13D /* Sources */,
+				D0417B109C934D0399B05EC2 /* Resources */,
+				848B1167C0744529BAAB21FE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = CQchat;
+			productName = CQchat;
+			productReference = 1BEC8F1D0BDA4DAAACB7833D /* CQchat.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D90EF28F73C8436D8FC90186 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = PROJCFG /* Build configuration list for PBXProject "CQchat" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 0F2AC08B4B1D46F089856BF4;
+			productRefGroup = 7EAC78BF468448AE94A53704 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C88948B2CF2044BAAB163150 /* CQchat */,
+			);
+		};
+		432FF330083C45DE8C04F13D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				91776565B02D49F2B4E46D24 /* CQchatApp.swift in Sources */,
+				A448990546104162B858C265 /* Constants.swift in Sources */,
+				893744A5A97840469D92B5A1 /* PacketCodec.swift in Sources */,
+				6A7F7ACDA3E84243ACB65D81 /* Fragmenter.swift in Sources */,
+				7B80C06968B248CEBC8F8C66 /* NoiseXX.swift in Sources */,
+				8B9CFFF8ED5247BBB8B4A7C0 /* IdentityKeys.swift in Sources */,
+				E2CFD684F962410C87BBA1AB /* DedupCache.swift in Sources */,
+				F2F99DBA7C224E6FBB16B3DD /* SessionManager.swift in Sources */,
+				2563964010294EAEB37AC605 /* ChatEngine.swift in Sources */,
+				99693D6BA94C4591B94B5696 /* ImageCompressor.swift in Sources */,
+				A4BCEA5770894F7A84273CAA /* OpusVoice.swift in Sources */,
+				E7FBACC1B0EF4B2FAB8BD33C /* BleMeshService.swift in Sources */,
+				FABE2FA0E09B461785FF84A4 /* HotspotTcpService.swift in Sources */,
+				CD47D09C27B941BBAC5E6181 /* LocalNotifier.swift in Sources */,
+				F3B6F82F921C498C9A09A459 /* ContentView.swift in Sources */,
+				153DA37188B7498BB6D5C4C4 /* QRViews.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0417B109C934D0399B05EC2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AF11896114354E4AA20F62BE /* v1.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		848B1167C0744529BAAB21FE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		957D26D8F60645F08E8A0E40 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				GCC_DYNAMIC_NO_PIC = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		B719CEAAD09647D3AEC3E301 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		E94216440DAF420F8322AC4D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CQchat/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cqchat.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		6FDD157194724DD9BACDC1D5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = CQchat/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.cqchat.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		PROJCFG /* Build configuration list for PBXProject "CQchat" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				957D26D8F60645F08E8A0E40 /* Debug */,
+				B719CEAAD09647D3AEC3E301 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		53A8F36BB98742418AADACBD /* Build configuration list for PBXNativeTarget "CQchat" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E94216440DAF420F8322AC4D /* Debug */,
+				6FDD157194724DD9BACDC1D5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+	};
+	rootObject = D90EF28F73C8436D8FC90186 /* Project object */;
+}
