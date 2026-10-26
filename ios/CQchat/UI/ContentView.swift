@@ -28,7 +28,7 @@ struct PublicChannelView: View {
             VStack(spacing: 0) {
                 List(engine.publicMessages) { msg in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(msg.fromNickname)
+                        Text(msg.fromNickname + " · 公开消息")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(msg.text ?? "")
@@ -102,8 +102,12 @@ struct PrivateChatView: View {
             }
             List(messages) { msg in
                 VStack(alignment: .leading) {
-                    if msg.status == .waiting {
-                        Text("等待热点…").font(.caption).foregroundStyle(.orange)
+                    if msg.status == .queued {
+                        Text("等待中…").font(.caption).foregroundStyle(.orange)
+                    } else if msg.status == .sent {
+                        Text("已交给附近").font(.caption2).foregroundStyle(.secondary)
+                    } else if msg.status == .delivered {
+                        Text("已送达").font(.caption2).foregroundStyle(.secondary)
                     }
                     if let t = msg.text { Text(t) }
                     if let thumb = msg.thumbJPEG, let ui = UIImage(data: thumb) {

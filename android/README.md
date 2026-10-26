@@ -2,7 +2,7 @@
 
 Kotlin · BLE · Keystore · 前台服务
 
-协议权威说明见 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md)。与 iOS 必须字节级一致。
+协议权威说明见 [`docs/protocol-v0.1.md`](../docs/protocol-v0.1.md)。与 iOS 必须字节级一致。
 
 ## 打开工程
 

@@ -13,7 +13,6 @@ import com.cqchat.app.transport.BleMeshListener
 import com.cqchat.app.transport.BleMeshService
 import com.cqchat.app.transport.HotspotListener
 import com.cqchat.app.transport.HotspotTcpService
-import java.security.SecureRandom
 
 data class ChatMessage(
     val id: ByteArray,
@@ -29,7 +28,7 @@ data class ChatMessage(
     val ts: Long = System.currentTimeMillis(),
 ) {
     enum class Kind { TEXT, IMAGE, VOICE, SYSTEM }
-    enum class Status { SENT, WAITING, FAILED, RECEIVED }
+    enum class Status { QUEUED, SENT, DELIVERED, FAILED, RECEIVED }
 }
 
 data class Peer(
@@ -137,7 +136,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             val msg = ChatMessage(
                 CQPacket.random16(), kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
                 fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
-                isPublic = false, status = ChatMessage.Status.WAITING,
+                isPublic = false, status = ChatMessage.Status.QUEUED,
             )
             pendingMedia.add(msg)
             appendPrivate(fp, msg)
@@ -161,7 +160,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                     val msg = ChatMessage(
                         msgId, kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
                         fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
-                        isPublic = false, status = ChatMessage.Status.WAITING,
+                        isPublic = false, status = ChatMessage.Status.QUEUED,
                     )
                     pendingMedia.add(msg)
                     appendPrivate(fp, msg)
@@ -201,7 +200,7 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     override fun onPeersChanged(count: Int) {
         // flush waiting media when hotspot peers appear
         if (count > 0) {
-            for (msg in pendingMedia.filter { it.status == ChatMessage.Status.WAITING }) {
+            for (msg in pendingMedia.filter { it.status == ChatMessage.Status.QUEUED }) {
                 // re-send attempted by UI calling send again; mark for flush
             }
         }
@@ -216,7 +215,10 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             CQ.Type.HANDSHAKE -> handleHandshake(pkt)
             CQ.Type.PRIVATE -> handlePrivate(pkt)
             CQ.Type.ACK -> {
-                AckPayload.decode(pkt.payload)?.let { awaitingAck.remove(it.toHex()) }
+                AckPayload.decode(pkt.payload)?.let {
+                    awaitingAck.remove(it.toHex())
+                    markDelivered(it)
+                }
             }
         }
     }
@@ -249,48 +251,45 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             2 -> {
                 val noise = sessions.handshake(temp) ?: return
                 noise.initiatorRead2(body)
-                val helloBody = byteArrayOf(identity.nickname.toByteArray().size.toByte()) +
-                    identity.nickname.toByteArray()
-                val out = noise.initiatorWrite3(PrivatePlaintext.encode(CQ.Content.HELLO, helloBody))
+                val out = noise.initiatorWrite3(encodeHello())
                 val payload = HandshakePayload.encode(3, out)
                 routeOut(CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload).encode(), false)
                 sessions.complete(temp)
-                noise.remoteFingerprint?.let { upsertPeer(temp, it, "peer") }
+                noise.remoteSessionId?.let { upsertPeer(temp, it, "peer") }
             }
             3 -> {
                 val noise = sessions.handshake(temp) ?: return
                 val payload = noise.responderRead3(body)
                 sessions.complete(temp)
-                val fp = noise.remoteFingerprint ?: return
+                val sid = noise.remoteSessionId ?: return
+                var idFp = sid
                 var nick = "peer"
                 PrivatePlaintext.decode(payload)?.let { (ct, b) ->
-                    if (ct == CQ.Content.HELLO && b.isNotEmpty()) {
-                        val nlen = b[0].toInt() and 0xff
-                        nick = b.copyOfRange(1, 1 + nlen).toString(Charsets.UTF_8)
-                        sessions.updateNickname(fp, nick)
+                    if (ct == CQ.Content.HELLO) {
+                        parseHello(b)?.let { (n, edPk) ->
+                            nick = n
+                            idFp = IdentityCrypto.fingerprint(edPk)
+                            if (!idFp.contentEquals(sid)) sessions.rebind(sid, idFp)
+                        }
                     }
                 }
-                val helloBody = byteArrayOf(identity.nickname.toByteArray().size.toByte()) +
-                    identity.nickname.toByteArray()
-                sessions.session(fp)?.noise?.encrypt(
-                    PrivatePlaintext.encode(CQ.Content.HELLO, helloBody)
-                )?.let { cipher ->
+                sessions.updateNickname(idFp, nick)
+                sessions.session(idFp)?.noise?.encrypt(encodeHello())?.let { cipher ->
                     routeOut(
                         CQPacket.make(CQ.Type.PRIVATE, ble.tempId, payload = cipher).encode(),
                         false,
                     )
                 }
-                upsertPeer(temp, fp, nick)
+                upsertPeer(temp, idFp, nick)
             }
         }
     }
 
     private fun handlePrivate(pkt: CQPacket) {
-        for (s in sessions.all()) {
-            val fp = s.noise.remoteFingerprint ?: continue
+        for ((fp, s) in sessions.all()) {
             val plain = try {
                 s.noise.decrypt(pkt.payload)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 continue
             }
             val (ct, body) = PrivatePlaintext.decode(plain) ?: continue
@@ -327,16 +326,42 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                     ))
                 }
                 CQ.Content.HELLO -> {
-                    if (body.isNotEmpty()) {
-                        val nlen = body[0].toInt() and 0xff
-                        val nick = body.copyOfRange(1, 1 + nlen).toString(Charsets.UTF_8)
-                        sessions.updateNickname(fp, nick)
+                    parseHello(body)?.let { (nick, edPk) ->
+                        val idFp = IdentityCrypto.fingerprint(edPk)
+                        if (!idFp.contentEquals(fp)) sessions.rebind(fp, idFp)
+                        sessions.updateNickname(idFp, nick)
+                        upsertPeer(s.remoteTempId, idFp, nick)
                     }
                 }
             }
             return
         }
         Log.w("CQchat", "private decrypt miss")
+    }
+
+
+    private fun encodeHello(): ByteArray {
+        val nick = identity.nickname.toByteArray(Charsets.UTF_8)
+        val body = byteArrayOf(nick.size.toByte()) + nick + identity.ed25519Public
+        return PrivatePlaintext.encode(CQ.Content.HELLO, body)
+    }
+
+    private fun parseHello(body: ByteArray): Pair<String, ByteArray>? {
+        if (body.isEmpty()) return null
+        val n = body[0].toInt() and 0xff
+        if (body.size < 1 + n + 32) return null
+        val nick = body.copyOfRange(1, 1 + n).toString(Charsets.UTF_8)
+        val pk = body.copyOfRange(1 + n, 1 + n + 32)
+        return nick to pk
+    }
+
+    private fun markDelivered(msgId: ByteArray) {
+        for ((_, list) in privateMessages) {
+            val i = list.indexOfFirst { it.id.contentEquals(msgId) }
+            if (i >= 0) {
+                list[i].status = ChatMessage.Status.DELIVERED
+            }
+        }
     }
 
     private fun upsertPeer(tempId: ByteArray, fingerprint: ByteArray?, nickname: String) {

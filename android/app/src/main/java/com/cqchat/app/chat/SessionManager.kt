@@ -1,6 +1,7 @@
 package com.cqchat.app.chat
 
 import com.cqchat.app.protocol.NoiseXX
+import com.cqchat.app.protocol.hexToBytes
 import com.cqchat.app.protocol.toHex
 
 class SessionManager(private val staticPrivate: ByteArray) {
@@ -27,20 +28,29 @@ class SessionManager(private val staticPrivate: ByteArray) {
     fun complete(tempId: ByteArray, nickname: String = "") {
         val n = handshakeByTemp.remove(tempId.toHex()) ?: return
         if (!n.completed) return
-        val fp = n.remoteFingerprint ?: return
-        byFingerprint[fp.toHex()] = Session(n, tempId, nickname)
+        val sid = n.remoteSessionId ?: return
+        byFingerprint[sid.toHex()] = Session(n, tempId, nickname)
+    }
+
+    @Synchronized
+    fun rebind(fromSessionId: ByteArray, toIdentityFingerprint: ByteArray) {
+        val s = byFingerprint.remove(fromSessionId.toHex()) ?: return
+        byFingerprint[toIdentityFingerprint.toHex()] = s
     }
 
     @Synchronized
     fun session(fp: ByteArray): Session? = byFingerprint[fp.toHex()]
 
     @Synchronized
-    fun all(): List<Session> = byFingerprint.values.toList()
+    fun all(): List<Pair<ByteArray, Session>> =
+        byFingerprint.map { (it.key.hexToBytes() ?: ByteArray(0)) to it.value }
 
     @Synchronized
-    fun fingerprintForTemp(tempId: ByteArray): ByteArray? =
-        byFingerprint.values.firstOrNull { it.remoteTempId.contentEquals(tempId) }
-            ?.noise?.remoteFingerprint
+    fun fingerprintForTemp(tempId: ByteArray): ByteArray? {
+        val e = byFingerprint.entries.firstOrNull { it.value.remoteTempId.contentEquals(tempId) }
+            ?: return null
+        return e.key.hexToBytes()
+    }
 
     @Synchronized
     fun updateNickname(fp: ByteArray, name: String) {

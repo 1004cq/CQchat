@@ -26,12 +26,18 @@ enum IdentityKeys {
         return (seed, x25519, ed25519)
     }
 
-    static func fingerprint(x25519Public: Data) -> Data {
-        Data(SHA256.hash(data: x25519Public)).prefix(16)
+    /// Identity fingerprint = SHA256(ed25519_public)[0..<16] (protocol-v0.1).
+    static func fingerprint(ed25519Public: Data) -> Data {
+        Data(SHA256.hash(data: ed25519Public)).prefix(16)
     }
 
-    static func fingerprintHex(x25519Public: Data) -> String {
-        fingerprint(x25519Public: x25519Public).hex
+    static func fingerprintHex(ed25519Public: Data) -> String {
+        fingerprint(ed25519Public: ed25519Public).hex
+    }
+
+    /// Provisional session id before Hello binds Ed25519 identity.
+    static func sessionId(x25519Public: Data) -> Data {
+        Data(SHA256.hash(data: x25519Public)).prefix(16)
     }
 
     static func qrString(fingerprint: Data) -> String {

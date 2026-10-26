@@ -44,7 +44,7 @@ class IdentityStore(context: Context) {
         x25519Public = X25519PrivateKeyParameters(xSeed, 0).generatePublicKey().encoded
         ed25519Private = eSeed
         ed25519Public = Ed25519PrivateKeyParameters(eSeed, 0).generatePublicKey().encoded
-        fingerprint = IdentityCrypto.fingerprint(x25519Public)
+        fingerprint = IdentityCrypto.fingerprint(ed25519Public)
         fingerprintHex = fingerprint.toHex()
     }
 

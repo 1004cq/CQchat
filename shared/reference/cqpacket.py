@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CQchat v1 packet reference encoder/decoder. Big-endian. Matches docs/PROTOCOL.md."""
+"""CQchat v1 packet reference encoder/decoder. Big-endian. Matches docs/protocol-v0.1.md."""
 
 from __future__ import annotations
 
@@ -40,8 +40,9 @@ def hkdf_sha256(ikm: bytes, info: bytes, length: int = 32, salt: bytes = b"") ->
     return out[:length]
 
 
-def fingerprint(x25519_public: bytes) -> bytes:
-    return hashlib.sha256(x25519_public).digest()[:16]
+def fingerprint(ed25519_public: bytes) -> bytes:
+    """Identity fingerprint = SHA256(ed25519_public)[0:16] (not X25519)."""
+    return hashlib.sha256(ed25519_public).digest()[:16]
 
 
 def encode_header(
@@ -206,22 +207,26 @@ def main() -> None:
     seed = bytes.fromhex("00" * 31 + "01")
     xseed = hkdf_sha256(seed, b"cqchat-v1-x25519")
     eseed = hkdf_sha256(seed, b"cqchat-v1-ed25519")
-    # fingerprint of a fake pubkey = sha256(xseed)[:16] for vector stability only
+    # Vector uses ed25519_seed bytes standing in as a 32-byte public for stable hex
     vectors["hkdf"] = {
         "identity_seed_hex": seed.hex(),
         "x25519_seed_hex": xseed.hex(),
         "ed25519_seed_hex": eseed.hex(),
-        "fingerprint_of_xseed_as_pk_hex": fingerprint(xseed).hex(),
+        "fingerprint_of_ed25519_seed_as_pk_hex": fingerprint(eseed).hex(),
     }
+    vectors["spec"] = "protocol-v0.1"
 
     vectors["tcp_frame"] = {"hex": tcp_frame(empty).hex()}
 
     vectors["header_size"] = HEADER_SIZE
     vectors["version"] = VERSION
 
-    out = Path(__file__).resolve().parents[1] / "test-vectors" / "v1.json"
+    out_dir = Path(__file__).resolve().parents[1] / "test-vectors"
+    out = out_dir / "v0.1.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(vectors, indent=2) + "\n")
+    payload = json.dumps(vectors, indent=2) + "\n"
+    out.write_text(payload)
+    (out_dir / "v1.json").write_text(payload)  # alias during transition
     print(f"wrote {out}")
 
 

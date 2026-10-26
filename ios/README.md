@@ -2,7 +2,7 @@
 
 Swift / SwiftUI · CoreBluetooth · Keychain
 
-协议权威说明见仓库根目录 [`docs/PROTOCOL.md`](../docs/PROTOCOL.md)。与 Android 必须字节级一致。
+协议权威说明见仓库根目录 [`docs/protocol-v0.1.md`](../docs/protocol-v0.1.md)。与 Android 必须字节级一致。
 
 ## 打开工程
 
@@ -28,4 +28,4 @@ Swift / SwiftUI · CoreBluetooth · Keychain
 
 ## 协议自检
 
-`CQchat/Resources/v1.json` 与 `shared/test-vectors/v1.json` 相同，包头编码必须对得上。
+`CQchat/Resources/v0.1.json` 与 `shared/test-vectors/v0.1.json` 相同，包头编码必须对得上。

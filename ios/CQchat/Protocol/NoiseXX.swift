@@ -46,8 +46,9 @@ final class NoiseXX {
         mixHash(Data()) // empty prologue
     }
 
-    var remoteFingerprint: Data? {
-        remoteStatic.map { IdentityKeys.fingerprint(x25519Public: $0) }
+    /// Provisional id from Noise static (X25519). Identity fingerprint comes from Hello's Ed25519.
+    var remoteSessionId: Data? {
+        remoteStatic.map { IdentityKeys.sessionId(x25519Public: $0) }
     }
 
     // MARK: Initiator

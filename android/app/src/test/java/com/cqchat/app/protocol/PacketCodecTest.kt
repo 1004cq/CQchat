@@ -48,7 +48,13 @@ class PacketCodecTest {
         val e = NoiseXX.cqHkdf(seed, ByteArray(0), "cqchat-v1-ed25519".toByteArray(), 32)
         assertEquals(hk.getString("x25519_seed_hex"), x.toHex())
         assertEquals(hk.getString("ed25519_seed_hex"), e.toHex())
-        assertEquals(hk.getString("fingerprint_of_xseed_as_pk_hex"), IdentityCrypto.fingerprint(x).toHex())
+        val fpKey = if (hk.has("fingerprint_of_ed25519_seed_as_pk_hex")) {
+            "fingerprint_of_ed25519_seed_as_pk_hex"
+        } else {
+            "fingerprint_of_xseed_as_pk_hex"
+        }
+        val fpInput = if (fpKey.startsWith("fingerprint_of_ed25519")) e else x
+        assertEquals(hk.getString(fpKey), IdentityCrypto.fingerprint(fpInput).toHex())
     }
 
     @Test

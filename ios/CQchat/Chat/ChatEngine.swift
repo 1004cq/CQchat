@@ -5,7 +5,8 @@ import Combine
 
 struct ChatMessage: Identifiable, Equatable {
     enum Kind { case text, image, voice, system }
-    enum Status { case sent, waiting, failed, received }
+    /// protocol-v0.1: created/queued/sent/delivered/failed (+ received for inbound)
+    enum Status { case queued, sent, delivered, failed, received }
     let id: Data
     let kind: Kind
     let text: String?
@@ -53,7 +54,7 @@ final class ChatEngine: ObservableObject {
         self.x25519 = keys.x25519
         self.ed25519 = keys.ed25519
         self.myFingerprint = IdentityKeys.fingerprint(
-            x25519Public: keys.x25519.publicKey.rawRepresentation
+            ed25519Public: keys.ed25519.publicKey.rawRepresentation
         )
         self.myFingerprintHex = myFingerprint.hex
         self.sessions = SessionManager(staticKey: keys.x25519)
@@ -166,7 +167,7 @@ final class ChatEngine: ObservableObject {
             let msg = ChatMessage(
                 id: Data.random16(), kind: kind, text: nil, imageJPEG: full, thumbJPEG: thumb,
                 voiceCQOP: voice, fromFingerprint: myFingerprint, fromNickname: nickname,
-                isPublic: false, status: .waiting, ts: Date()
+                isPublic: false, status: .queued, ts: Date()
             )
             pendingMedia.append(msg)
             appendPrivate(msg, fp: fp)
@@ -192,7 +193,7 @@ final class ChatEngine: ObservableObject {
                     var queued = ChatMessage(
                         id: msgId, kind: kind, text: nil, imageJPEG: full, thumbJPEG: thumb,
                         voiceCQOP: voice, fromFingerprint: myFingerprint, fromNickname: nickname,
-                        isPublic: false, status: .waiting, ts: Date()
+                        isPublic: false, status: .queued, ts: Date()
                     )
                     pendingMedia.append(queued)
                     appendPrivate(queued, fp: fp)
@@ -213,7 +214,7 @@ final class ChatEngine: ObservableObject {
     /// Retry waiting media when TCP peers appear — same msg_id.
     func flushPendingMedia(toFingerprint fp: Data) {
         guard tcp.isLikelyOnLocalNetwork else { return }
-        let waiting = pendingMedia.filter { $0.status == .waiting }
+        let waiting = pendingMedia.filter { $0.status == .queued }
         pendingMedia.removeAll()
         for msg in waiting {
             if msg.kind == .image, let full = msg.imageJPEG {
@@ -261,6 +262,7 @@ final class ChatEngine: ObservableObject {
         case .ack:
             if let ackId = AckPayload.decode(pkt.payload) {
                 awaitingAck.removeValue(forKey: ackId)
+                markDelivered(ackId)
             }
         default:
             break
@@ -296,14 +298,12 @@ final class ChatEngine: ObservableObject {
         case 2:
             guard let noise = sessions.handshake(forTemp: temp) else { return }
             _ = try? noise.initiatorRead2(body)
-            if let out = try? noise.initiatorWrite3(payload: PrivatePlaintext.encode(
-                contentType: .hello, body: Data([UInt8(nickname.utf8.count)]) + Data(nickname.utf8)
-            )) {
+            if let out = try? noise.initiatorWrite3(payload: encodeHello()) {
                 let payload = HandshakePayload.encode(step: 3, body: out)
                 let resp = CQPacket.make(type: .handshake, sender: ble.currentTempId, payload: payload)
                 routeOut(resp.encode(), preferTCP: false)
                 sessions.complete(tempId: temp, nickname: "")
-                if let fp = noise.remoteFingerprint {
+                if let fp = noise.remoteSessionId {
                     upsertPeer(tempId: temp, fingerprint: fp, nickname: "peer")
                 }
             }
@@ -311,25 +311,21 @@ final class ChatEngine: ObservableObject {
             guard let noise = sessions.handshake(forTemp: temp) else { return }
             let payload = (try? noise.responderRead3(body)) ?? Data()
             sessions.complete(tempId: temp)
-            if let fp = noise.remoteFingerprint {
-                var nick = "peer"
-                if let (ct, body) = PrivatePlaintext.decode(payload), ct == .hello, let nlen = body.first {
-                    nick = String(data: body.dropFirst().prefix(Int(nlen)), encoding: .utf8) ?? nick
-                    sessions.updateNickname(nick, fingerprint: fp)
-                }
-                // send hello back encrypted
-                if let hello = try? sessions.encrypt(
-                    to: fp,
-                    plaintext: PrivatePlaintext.encode(
-                        contentType: .hello,
-                        body: Data([UInt8(nickname.utf8.count)]) + Data(nickname.utf8)
-                    )
-                ) {
-                    let p = CQPacket.make(type: .privateMsg, sender: ble.currentTempId, payload: hello)
-                    routeOut(p.encode(), preferTCP: false)
-                }
-                upsertPeer(tempId: temp, fingerprint: fp, nickname: nick)
+            guard let sid = noise.remoteSessionId else { return }
+            var idFp = sid
+            var nick = "peer"
+            if let (ct, helloBody) = PrivatePlaintext.decode(payload), ct == .hello,
+               let parsed = parseHello(helloBody) {
+                nick = parsed.0
+                idFp = IdentityKeys.fingerprint(ed25519Public: parsed.1)
+                if idFp != sid { sessions.rebind(fromSessionId: sid, toIdentityFingerprint: idFp) }
             }
+            sessions.updateNickname(nick, fingerprint: idFp)
+            if let hello = try? sessions.encrypt(to: idFp, plaintext: encodeHello()) {
+                let p = CQPacket.make(type: .privateMsg, sender: ble.currentTempId, payload: hello)
+                routeOut(p.encode(), preferTCP: false)
+            }
+            upsertPeer(tempId: temp, fingerprint: idFp, nickname: nick)
         default:
             break
         }
@@ -345,9 +341,8 @@ final class ChatEngine: ObservableObject {
             )
             return
         }
-        for s in sessions.allSessions() {
-            guard let fp = s.noise.remoteFingerprint,
-                  let plain = try? s.noise.decrypt(pkt.payload),
+        for (fp, s) in sessions.allSessions() {
+            guard let plain = try? s.noise.decrypt(pkt.payload),
                   let (ct, body) = PrivatePlaintext.decode(plain) else { continue }
             consumePrivate(
                 ct: ct, body: body, fp: fp, msgId: pkt.msgId,
@@ -390,11 +385,17 @@ final class ChatEngine: ObservableObject {
                 ), fp: fp)
             }
         case .hello:
-            if let nlen = body.first {
-                let nick = String(data: body.dropFirst().prefix(Int(nlen)), encoding: .utf8) ?? ""
-                sessions.updateNickname(nick, fingerprint: fp)
-                if let i = peers.firstIndex(where: { $0.fingerprint == fp }) {
+            if let (nick, edPk) = parseHello(body) {
+                let idFp = IdentityKeys.fingerprint(ed25519Public: edPk)
+                if fp != idFp {
+                    sessions.rebind(fromSessionId: fp, toIdentityFingerprint: idFp)
+                }
+                sessions.updateNickname(nick, fingerprint: idFp)
+                upsertPeer(tempId: Data(), fingerprint: idFp, nickname: nick)
+                if let i = peers.firstIndex(where: { $0.fingerprint == idFp || $0.fingerprint == fp }) {
+                    peers[i].fingerprint = idFp
                     peers[i].nickname = nick
+                    peers[i].verified = IdentityKeys.isVerified(fingerprint: idFp)
                 }
             }
         }
@@ -424,6 +425,33 @@ final class ChatEngine: ObservableObject {
         }
     }
 }
+
+
+    private func encodeHello() -> Data {
+        let nick = Data(nickname.utf8)
+        var body = Data([UInt8(nick.count)])
+        body.append(nick)
+        body.append(ed25519.publicKey.rawRepresentation)
+        return PrivatePlaintext.encode(contentType: .hello, body: body)
+    }
+
+    private func parseHello(_ body: Data) -> (String, Data)? {
+        guard let nlen = body.first else { return nil }
+        let n = Int(nlen)
+        guard body.count >= 1 + n + 32 else { return nil }
+        let nick = String(data: body.subdata(in: 1..<(1 + n)), encoding: .utf8) ?? "peer"
+        let pk = body.subdata(in: (1 + n)..<(1 + n + 32))
+        return (nick, pk)
+    }
+
+    private func markDelivered(_ msgId: Data) {
+        for (fp, var list) in privateMessages {
+            if let i = list.firstIndex(where: { $0.id == msgId }) {
+                list[i].status = .delivered
+                privateMessages[fp] = list
+            }
+        }
+    }
 
 extension ChatEngine: BleMeshDelegate {
     nonisolated func bleDidReceive(packet: Data, fromTempId: Data?) {

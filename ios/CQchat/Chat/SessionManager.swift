@@ -24,9 +24,9 @@ final class SessionManager {
         return byFingerprint[fingerprint]
     }
 
-    func allSessions() -> [Session] {
+    func allSessions() -> [(id: Data, session: Session)] {
         lock.lock(); defer { lock.unlock() }
-        return Array(byFingerprint.values)
+        return byFingerprint.map { ($0.key, $0.value) }
     }
 
     func beginHandshake(as role: NoiseXX.Role, tempId: Data) -> NoiseXX {
@@ -45,10 +45,17 @@ final class SessionManager {
         lock.lock(); defer { lock.unlock() }
         guard let n = handshakeByTemp.removeValue(forKey: tempId),
               n.completed,
-              let fp = n.remoteFingerprint else { return }
-        byFingerprint[fp] = Session(
+              let sid = n.remoteSessionId else { return }
+        // Keyed by provisional session id until Hello binds Ed25519 fingerprint.
+        byFingerprint[sid] = Session(
             noise: n, remoteTempId: tempId, nickname: nickname, established: Date()
         )
+    }
+
+    func rebind(fromSessionId sid: Data, toIdentityFingerprint fp: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard let s = byFingerprint.removeValue(forKey: sid) else { return }
+        byFingerprint[fp] = s
     }
 
     func bindTempId(_ tempId: Data, toFingerprint fp: Data) {

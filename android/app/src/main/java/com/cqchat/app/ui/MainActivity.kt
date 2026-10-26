@@ -162,8 +162,14 @@ fun PrivateScreen(engine: ChatEngine, peer: Peer, onBack: () -> Unit) {
         }
         LazyColumn(Modifier.weight(1f)) {
             items(msgs, key = { it.id.toHex() }) { msg ->
-                if (msg.status == ChatMessage.Status.WAITING) {
-                    Text("等待热点…", color = MaterialTheme.colorScheme.tertiary)
+                when (msg.status) {
+                    ChatMessage.Status.QUEUED ->
+                        Text("等待中…", color = MaterialTheme.colorScheme.tertiary)
+                    ChatMessage.Status.SENT ->
+                        Text("已交给附近", style = MaterialTheme.typography.labelSmall)
+                    ChatMessage.Status.DELIVERED ->
+                        Text("已送达", style = MaterialTheme.typography.labelSmall)
+                    else -> {}
                 }
                 msg.text?.let { Text(it) }
                 msg.thumbJpeg?.let { bytes ->

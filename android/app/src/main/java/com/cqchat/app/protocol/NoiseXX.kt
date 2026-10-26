@@ -55,8 +55,9 @@ class NoiseXX(
         mixHash(ByteArray(0))
     }
 
-    val remoteFingerprint: ByteArray?
-        get() = remoteStatic?.let { IdentityCrypto.fingerprint(it) }
+    /** Provisional id from Noise static (X25519). Identity fingerprint comes from Hello's Ed25519. */
+    val remoteSessionId: ByteArray?
+        get() = remoteStatic?.let { IdentityCrypto.sessionId(it) }
 
     private fun staticPublic(): ByteArray =
         X25519PrivateKeyParameters(staticPrivate, 0).generatePublicKey().encoded
@@ -291,6 +292,10 @@ class CipherState(key: ByteArray) {
 }
 
 object IdentityCrypto {
-    fun fingerprint(x25519Public: ByteArray): ByteArray =
+    /** Identity fingerprint = SHA256(ed25519_public)[0:16] (protocol-v0.1). */
+    fun fingerprint(ed25519Public: ByteArray): ByteArray =
+        NoiseXX.sha256(ed25519Public).copyOf(16)
+
+    fun sessionId(x25519Public: ByteArray): ByteArray =
         NoiseXX.sha256(x25519Public).copyOf(16)
 }
