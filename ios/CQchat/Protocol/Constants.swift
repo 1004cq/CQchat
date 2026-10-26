@@ -7,6 +7,9 @@ enum CQ {
     static let ttlDefault: UInt8 = 7
     static let tempIdRotateSecs: TimeInterval = 180
     static let dedupTtlSecs: TimeInterval = 300
+    static let msgExpirySecs: TimeInterval = 600
+    static let maxRetries = 5
+    static let ackRetrySecs: TimeInterval = 2.5
     static let tcpPort: UInt16 = 37251
     static let mdnsType = "_cqchat._tcp."
     static let mediaBleMax = 102_400

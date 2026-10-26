@@ -18,7 +18,7 @@ struct CQchatApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(engine)
-                .onAppear { engine.start() }
+                // Nearby mode is user-gated; do not auto-start BLE on launch.
         }
     }
 }

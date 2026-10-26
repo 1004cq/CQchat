@@ -6,7 +6,7 @@ protocol BleMeshDelegate: AnyObject {
     func bleDidDiscover(tempId: Data)
 }
 
-/// Simultaneous central + peripheral. Advertises only VERSION||temp_id in service data.
+/// Simultaneous central + peripheral with negotiated MTU and per-peer serial write queues.
 final class BleMeshService: NSObject {
     weak var delegate: BleMeshDelegate?
 
@@ -15,6 +15,9 @@ final class BleMeshService: NSObject {
     private var inboxChar: CBMutableCharacteristic?
     private var connectedPeripherals: [UUID: CBPeripheral] = [:]
     private var inboxChars: [UUID: CBCharacteristic] = [:]
+    private var writeQueues: [UUID: [Data]] = [:]
+    private var writeBusy: [UUID: Bool] = [:]
+    private var negotiatedMtu: [UUID: Int] = [:] // ATT payload bytes
     private var tempId: Data
     private let dedup = DedupCache()
     private let reassembler = FragmentReassembler()
@@ -34,9 +37,23 @@ final class BleMeshService: NSObject {
 
     var currentTempId: Data { tempId }
 
+    /// Conservative payload size across links (min of negotiated).
+    var effectivePayloadMtu: Int {
+        let vals = negotiatedMtu.values
+        let link = vals.isEmpty ? CQ.bleMtuPayload : (vals.min() ?? CQ.bleMtuPayload)
+        return max(20, min(CQ.bleMtuPayload, link))
+    }
+
     func start() {
         startAdvertising()
         startScanning()
+    }
+
+    func stop() {
+        rotateTimer?.invalidate()
+        central.stopScan()
+        peripheral.stopAdvertising()
+        connectedPeripherals.values.forEach { central.cancelPeripheralConnection($0) }
     }
 
     func rotateTempId() {
@@ -47,37 +64,68 @@ final class BleMeshService: NSObject {
     }
 
     func send(_ packetData: Data) {
+        let chunk = max(64, effectivePayloadMtu - CQ.headerSize - 4)
         let wire: [Data]
-        if packetData.count > CQ.bleMtuPayload {
+        if packetData.count > effectivePayloadMtu {
             guard let pkt = CQPacket.decode(packetData) else { return }
             wire = Fragmenter.split(
                 rawPacket: packetData,
                 sender: pkt.sender,
                 msgId: pkt.msgId,
                 ttl: pkt.ttl,
-                chunkSize: max(64, CQ.bleMtuPayload - CQ.headerSize - 4)
+                chunkSize: chunk
             )
         } else {
             wire = [packetData]
         }
-        for chunk in wire {
-            writeToCentrals(chunk)
-            writeToPeripherals(chunk)
+        for piece in wire {
+            enqueueNotify(piece)
+            for id in connectedPeripherals.keys {
+                enqueueWrite(id, piece)
+            }
         }
     }
 
-    private func writeToCentrals(_ data: Data) {
+    private func enqueueNotify(_ data: Data) {
         guard let char = inboxChar else { return }
-        peripheral.updateValue(data, for: char, onSubscribedCentrals: nil)
+        if !peripheral.updateValue(data, for: char, onSubscribedCentrals: nil) {
+            // Will retry on peripheralManagerIsReady
+            var q = writeQueues[UUID()] ?? [] // use zero UUID bucket for notify backlog
+            _ = q
+            notifyBacklog.append(data)
+        }
     }
 
-    private func writeToPeripherals(_ data: Data) {
-        for (id, p) in connectedPeripherals {
-            guard let c = inboxChars[id] else { continue }
-            let mtu = p.maximumWriteValueLength(for: .withoutResponse)
-            if data.count <= mtu {
-                p.writeValue(data, for: c, type: .withoutResponse)
+    private var notifyBacklog: [Data] = []
+
+    private func enqueueWrite(_ id: UUID, _ data: Data) {
+        var q = writeQueues[id] ?? []
+        q.append(data)
+        writeQueues[id] = q
+        pumpWrite(id)
+    }
+
+    private func pumpWrite(_ id: UUID) {
+        guard writeBusy[id] != true,
+              var q = writeQueues[id], !q.isEmpty,
+              let p = connectedPeripherals[id],
+              let c = inboxChars[id] else { return }
+        let data = q.removeFirst()
+        writeQueues[id] = q
+        let mtu = negotiatedMtu[id] ?? p.maximumWriteValueLength(for: .withoutResponse)
+        negotiatedMtu[id] = mtu
+        if data.count <= mtu {
+            writeBusy[id] = true
+            p.writeValue(data, for: c, type: .withoutResponse)
+            // withoutResponse: free after short delay / ready callback
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                self?.writeBusy[id] = false
+                self?.pumpWrite(id)
             }
+        } else {
+            // Should have been fragmented; drop oversized as last resort after re-queue head
+            writeBusy[id] = false
+            pumpWrite(id)
         }
     }
 
@@ -112,12 +160,9 @@ final class BleMeshService: NSObject {
             if dedup.seen(pkt.msgId) { return }
         }
         delegate?.bleDidReceive(packet: data, fromTempId: pkt.sender)
-
-        // Mesh relay
         if pkt.ttl > 1 {
             var relay = pkt
             relay.ttl -= 1
-            // slight jitter could be added; keep simple for MVP
             send(relay.encode())
         }
     }
@@ -136,16 +181,27 @@ extension BleMeshService: CBCentralManagerDelegate {
     ) {
         if let sd = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
            let blob = sd[CQ.serviceUUID], blob.count >= 17 {
-            let tid = blob.subdata(in: 1..<17)
-            delegate?.bleDidDiscover(tempId: tid)
+            delegate?.bleDidDiscover(tempId: blob.subdata(in: 1..<17))
         }
-        connectedPeripherals[peripheral.identifier] = peripheral
-        peripheral.delegate = self
-        central.connect(peripheral, options: nil)
+        if connectedPeripherals[peripheral.identifier] == nil {
+            connectedPeripherals[peripheral.identifier] = peripheral
+            peripheral.delegate = self
+            central.connect(peripheral, options: nil)
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        negotiatedMtu[peripheral.identifier] = peripheral.maximumWriteValueLength(for: .withoutResponse)
         peripheral.discoverServices([CQ.serviceUUID])
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        let id = peripheral.identifier
+        connectedPeripherals.removeValue(forKey: id)
+        inboxChars.removeValue(forKey: id)
+        writeQueues.removeValue(forKey: id)
+        writeBusy.removeValue(forKey: id)
+        negotiatedMtu.removeValue(forKey: id)
     }
 }
 
@@ -157,7 +213,9 @@ extension BleMeshService: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let c = service.characteristics?.first(where: { $0.uuid == CQ.inboxUUID }) else { return }
         inboxChars[peripheral.identifier] = c
+        negotiatedMtu[peripheral.identifier] = peripheral.maximumWriteValueLength(for: .withoutResponse)
         peripheral.setNotifyValue(true, for: c)
+        pumpWrite(peripheral.identifier)
     }
 
     func peripheral(
@@ -167,6 +225,11 @@ extension BleMeshService: CBPeripheralDelegate {
     ) {
         guard let data = characteristic.value else { return }
         handleIncoming(data)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        writeBusy[peripheral.identifier] = false
+        pumpWrite(peripheral.identifier)
     }
 }
 
@@ -187,14 +250,23 @@ extension BleMeshService: CBPeripheralManagerDelegate {
         startAdvertising()
     }
 
+    func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+        while let next = notifyBacklog.first {
+            guard let char = inboxChar else { return }
+            if peripheral.updateValue(next, for: char, onSubscribedCentrals: nil) {
+                notifyBacklog.removeFirst()
+            } else {
+                break
+            }
+        }
+    }
+
     func peripheralManager(
         _ peripheral: CBPeripheralManager,
         didReceiveWrite requests: [CBATTRequest]
     ) {
         for req in requests {
-            if let data = req.value {
-                handleIncoming(data)
-            }
+            if let data = req.value { handleIncoming(data) }
             peripheral.respond(to: req, withResult: .success)
         }
     }

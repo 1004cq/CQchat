@@ -1,9 +1,14 @@
 package com.cqchat.app.chat
 
 import android.app.Application
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import com.cqchat.app.crypto.IdentityStore
 import com.cqchat.app.media.ImageCompressor
@@ -13,6 +18,10 @@ import com.cqchat.app.transport.BleMeshListener
 import com.cqchat.app.transport.BleMeshService
 import com.cqchat.app.transport.HotspotListener
 import com.cqchat.app.transport.HotspotTcpService
+import com.cqchat.app.transport.MeshForegroundService
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
 
 data class ChatMessage(
     val id: ByteArray,
@@ -25,7 +34,9 @@ data class ChatMessage(
     val fromNickname: String,
     val isPublic: Boolean,
     var status: Status,
+    val destKey: ByteArray? = null,
     val ts: Long = System.currentTimeMillis(),
+    var pathHint: String = "",
 ) {
     enum class Kind { TEXT, IMAGE, VOICE, SYSTEM }
     enum class Status { QUEUED, SENT, DELIVERED, FAILED, RECEIVED }
@@ -37,6 +48,7 @@ data class Peer(
     var nickname: String = "附近",
     var verified: Boolean = false,
     var lastSeen: Long = System.currentTimeMillis(),
+    var pathHint: String = "BLE",
 )
 
 class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, HotspotListener {
@@ -46,25 +58,59 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     val peers = mutableStateListOf<Peer>()
     val pendingMedia = mutableStateListOf<ChatMessage>()
 
+    var nearbyMode by mutableStateOf(false)
+        private set
+    var transportHint by mutableStateOf("未开启附近模式")
+        private set
+
     private val sessions = SessionManager(identity.x25519Private)
     private val dedup = DedupCache()
+    private val pending = PendingOutbound()
     private val notifier = LocalNotifier(app)
     private val nearbyCooldown = HashMap<String, Long>()
-    private val awaitingAck = HashMap<String, ByteArray>()
+    private val handler = Handler(Looper.getMainLooper())
 
-    private lateinit var ble: BleMeshService
-    private lateinit var tcp: HotspotTcpService
+    private var ble: BleMeshService? = null
+    private var tcp: HotspotTcpService? = null
 
-    fun start() {
-        ble = BleMeshService(getApplication(), this)
-        tcp = HotspotTcpService(getApplication(), this)
-        ble.start()
-        tcp.start()
+    private val retryTick = object : Runnable {
+        override fun run() {
+            tickRetries()
+            handler.postDelayed(this, CQ.ACK_RETRY_MS)
+        }
+    }
+
+    fun setNearbyEnabled(on: Boolean) {
+        if (on == nearbyMode) return
+        nearbyMode = on
+        if (on) {
+            MeshForegroundService.start(getApplication())
+            startMesh()
+            transportHint = "附近模式 · BLE"
+            handler.post(retryTick)
+        } else {
+            handler.removeCallbacks(retryTick)
+            stopMesh()
+            MeshForegroundService.stop(getApplication())
+            transportHint = "附近模式已关闭"
+        }
+    }
+
+    private fun startMesh() {
+        if (ble != null) return
+        ble = BleMeshService(getApplication(), this).also { it.start() }
+        tcp = HotspotTcpService(getApplication(), this).also { it.start() }
+    }
+
+    private fun stopMesh() {
+        ble?.stop(); ble = null
+        tcp?.stop(); tcp = null
     }
 
     override fun onCleared() {
-        if (::ble.isInitialized) ble.stop()
-        if (::tcp.isInitialized) tcp.stop()
+        handler.removeCallbacks(retryTick)
+        stopMesh()
+        MeshForegroundService.stop(getApplication())
     }
 
     fun markVerified(qr: String) {
@@ -76,42 +122,58 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     }
 
     fun sendPublic(text: String) {
+        val b = ble ?: return
         val msgId = CQPacket.random16()
         val signMsg = BroadcastPayload.signMessage(msgId, identity.nickname, text)
         val sig = identity.sign(signMsg)
         val payload = BroadcastPayload.encode(identity.nickname, text, identity.ed25519Public, sig)
-        val pkt = CQPacket.make(CQ.Type.BROADCAST, ble.tempId, msgId, payload = payload)
+        val pkt = CQPacket.make(CQ.Type.BROADCAST, b.tempId, msgId, payload = payload)
         routeOut(pkt.encode(), preferTcp = false)
         publicMessages.add(
-            ChatMessage(msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = identity.fingerprint,
-                fromNickname = identity.nickname, isPublic = true, status = ChatMessage.Status.SENT)
+            ChatMessage(
+                msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = identity.fingerprint,
+                fromNickname = identity.nickname, isPublic = true, status = ChatMessage.Status.SENT,
+                pathHint = transportHint,
+            )
         )
     }
 
     fun startPrivate(peer: Peer) {
+        val b = ble ?: return
         val noise = sessions.begin(NoiseXX.Role.INITIATOR, peer.tempId)
         val body = noise.initiatorWrite1()
         val payload = HandshakePayload.encode(1, body)
-        val pkt = CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload)
-        routeOut(pkt.encode(), preferTcp = false)
+        routeOut(CQPacket.make(CQ.Type.HANDSHAKE, b.tempId, payload = payload).encode(), false)
     }
 
     fun sendPrivateText(text: String, fp: ByteArray) {
         val session = sessions.session(fp) ?: return
+        if (session.failed) return
         val plain = PrivatePlaintext.encode(CQ.Content.TEXT, text.toByteArray(Charsets.UTF_8))
-        val cipher = session.noise.encrypt(plain)
+        val cipher = try {
+            session.noise.encrypt(plain)
+        } catch (_: Exception) {
+            sessions.markFailed(fp); return
+        }
         val msgId = CQPacket.random16()
+        val b = ble ?: return
         val pkt = CQPacket.make(
-            CQ.Type.PRIVATE, ble.tempId, msgId,
+            CQ.Type.PRIVATE, b.tempId, msgId,
             flags = CQ.Flag.NEEDS_ACK, payload = cipher,
         )
         val wire = pkt.encode()
         routeOut(wire, preferTcp = false)
-        awaitingAck[msgId.toHex()] = wire
-        appendPrivate(fp, ChatMessage(
-            msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = identity.fingerprint,
-            fromNickname = identity.nickname, isPublic = false, status = ChatMessage.Status.SENT,
-        ))
+        pending.put(
+            PendingOutbound.Entry(msgId, wire, fp, 1, System.currentTimeMillis(), PendingOutbound.Entry.Kind.TEXT)
+        )
+        appendPrivate(
+            fp,
+            ChatMessage(
+                msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = identity.fingerprint,
+                fromNickname = identity.nickname, isPublic = false, status = ChatMessage.Status.SENT,
+                destKey = fp, pathHint = pathFor(fp),
+            )
+        )
     }
 
     fun sendPrivateImage(bytes: ByteArray, fp: ByteArray) {
@@ -121,46 +183,58 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         sendPrivateMedia(body, fp, ChatMessage.Kind.IMAGE, full, thumb)
     }
 
-    fun sendPrivateVoice(cqop: ByteArray, fp: ByteArray) {
-        val body = MediaContainer.encode(ByteArray(0), cqop)
-        sendPrivateMedia(body, fp, ChatMessage.Kind.VOICE, voice = cqop)
-    }
-
     private fun sendPrivateMedia(
         body: ByteArray, fp: ByteArray, kind: ChatMessage.Kind,
         full: ByteArray? = null, thumb: ByteArray? = null, voice: ByteArray? = null,
     ) {
         val session = sessions.session(fp) ?: return
         val size = body.size
-        if (size > CQ.MEDIA_BLE_MAX && !tcp.hasPeers) {
+        val hasTcp = tcp?.hasPeers == true
+        if (size > CQ.MEDIA_BLE_MAX && !hasTcp) {
             val msg = ChatMessage(
                 CQPacket.random16(), kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
                 fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
-                isPublic = false, status = ChatMessage.Status.QUEUED,
+                isPublic = false, status = ChatMessage.Status.QUEUED, destKey = fp,
+                pathHint = "等待热点",
             )
             pendingMedia.add(msg)
             appendPrivate(fp, msg)
             return
         }
+        if (!identity.isVerified(fp) && size > CQ.MEDIA_BLE_MAX) {
+            // Unverified: refuse auto large media
+            appendPrivate(
+                fp,
+                ChatMessage(
+                    CQPacket.random16(), ChatMessage.Kind.SYSTEM, text = "未验证设备不自动接收大文件",
+                    fromNickname = "系统", isPublic = false, status = ChatMessage.Status.FAILED, destKey = fp,
+                )
+            )
+            return
+        }
         val plain = PrivatePlaintext.encode(
-            if (kind == ChatMessage.Kind.IMAGE) CQ.Content.IMAGE else CQ.Content.VOICE,
-            body,
+            if (kind == ChatMessage.Kind.IMAGE) CQ.Content.IMAGE else CQ.Content.VOICE, body,
         )
-        val cipher = session.noise.encrypt(plain)
+        val cipher = try {
+            session.noise.encrypt(plain)
+        } catch (_: Exception) {
+            sessions.markFailed(fp); return
+        }
         val msgId = CQPacket.random16()
+        val b = ble ?: return
         val pkt = CQPacket.make(
-            CQ.Type.PRIVATE, ble.tempId, msgId,
-            flags = CQ.Flag.NEEDS_ACK, payload = cipher,
+            CQ.Type.PRIVATE, b.tempId, msgId, flags = CQ.Flag.NEEDS_ACK, payload = cipher,
         )
         val wire = pkt.encode()
         val preferTcp = size > 1024 || size > CQ.MEDIA_BLE_MAX
         if (preferTcp) {
-            if (!tcp.send(wire)) {
-                if (size <= CQ.MEDIA_BLE_MAX) ble.send(wire) else {
+            if (tcp?.send(wire) != true) {
+                if (size <= CQ.MEDIA_BLE_MAX) ble?.send(wire) else {
                     val msg = ChatMessage(
                         msgId, kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
                         fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
-                        isPublic = false, status = ChatMessage.Status.QUEUED,
+                        isPublic = false, status = ChatMessage.Status.QUEUED, destKey = fp,
+                        pathHint = "等待热点",
                     )
                     pendingMedia.add(msg)
                     appendPrivate(fp, msg)
@@ -168,42 +242,141 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                 }
             }
         } else {
-            routeOut(wire, preferTcp = false)
+            routeOut(wire, false)
         }
-        awaitingAck[msgId.toHex()] = wire
-        appendPrivate(fp, ChatMessage(
-            msgId, kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
-            fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
-            isPublic = false, status = ChatMessage.Status.SENT,
-        ))
+        pending.put(
+            PendingOutbound.Entry(msgId, wire, fp, 1, System.currentTimeMillis(), PendingOutbound.Entry.Kind.MEDIA)
+        )
+        appendPrivate(
+            fp,
+            ChatMessage(
+                msgId, kind, imageJpeg = full, thumbJpeg = thumb, voiceCqop = voice,
+                fromFingerprint = identity.fingerprint, fromNickname = identity.nickname,
+                isPublic = false, status = ChatMessage.Status.SENT, destKey = fp, pathHint = pathFor(fp),
+            )
+        )
+    }
+
+    fun flushPendingMedia(dest: ByteArray? = null) {
+        if (tcp?.hasPeers != true) return
+        val waiting = pendingMedia.filter {
+            it.status == ChatMessage.Status.QUEUED && (dest == null || it.destKey?.contentEquals(dest) == true)
+        }
+        pendingMedia.removeAll(waiting.toSet())
+        for (msg in waiting) {
+            val fp = msg.destKey ?: continue
+            when (msg.kind) {
+                ChatMessage.Kind.IMAGE -> {
+                    val full = msg.imageJpeg ?: continue
+                    val thumb = msg.thumbJpeg ?: ByteArray(0)
+                    sendPrivateMedia(MediaContainer.encode(thumb, full), fp, ChatMessage.Kind.IMAGE, full, thumb)
+                }
+                ChatMessage.Kind.VOICE -> {
+                    val v = msg.voiceCqop ?: continue
+                    sendPrivateMedia(MediaContainer.encode(ByteArray(0), v), fp, ChatMessage.Kind.VOICE, voice = v)
+                }
+                else -> {}
+            }
+        }
+    }
+
+    private fun tickRetries() {
+        for (e in pending.expired()) {
+            pending.remove(e.msgId)
+            markStatus(e.msgId, ChatMessage.Status.FAILED)
+        }
+        for (e in pending.dueForRetry()) {
+            if (e.tries >= CQ.MAX_RETRIES) continue
+            e.tries += 1
+            // Prefer TCP for media retries when available
+            if (e.kind == PendingOutbound.Entry.Kind.MEDIA && tcp?.hasPeers == true) {
+                tcp?.send(e.wire)
+            } else {
+                ble?.send(e.wire)
+            }
+        }
     }
 
     private fun routeOut(packet: ByteArray, preferTcp: Boolean) {
-        if (preferTcp && tcp.send(packet)) return
-        ble.send(packet)
+        if (preferTcp && tcp?.send(packet) == true) {
+            transportHint = "附近模式 · Wi‑Fi"
+            return
+        }
+        ble?.send(packet)
+        transportHint = if (tcp?.hasPeers == true) "附近模式 · BLE/Wi‑Fi" else "附近模式 · BLE"
     }
+
+    private fun pathFor(@Suppress("UNUSED_PARAMETER") fp: ByteArray): String =
+        if (tcp?.hasPeers == true) "Wi‑Fi 局域网" else "直连 BLE"
 
     private fun appendPrivate(fp: ByteArray, msg: ChatMessage) {
         val key = fp.toHex()
-        val list = privateMessages[key] ?: mutableStateListOf<ChatMessage>().also {
-            privateMessages[key] = it
-        }
+        val list = privateMessages[key] ?: mutableStateListOf<ChatMessage>().also { privateMessages[key] = it }
         list.add(msg)
+    }
+
+    private fun migratePrivateMap(from: ByteArray, to: ByteArray) {
+        val old = privateMessages.remove(from.toHex()) ?: return
+        val dest = privateMessages[to.toHex()] ?: mutableStateListOf<ChatMessage>().also {
+            privateMessages[to.toHex()] = it
+        }
+        dest.addAll(old)
+    }
+
+    private fun markStatus(msgId: ByteArray, status: ChatMessage.Status) {
+        for ((_, list) in privateMessages) {
+            val i = list.indexOfFirst { it.id.contentEquals(msgId) }
+            if (i >= 0) list[i].status = status
+        }
+        val pi = pendingMedia.indexOfFirst { it.id.contentEquals(msgId) }
+        if (pi >= 0) pendingMedia[pi].status = status
+    }
+
+    private fun encodeHello(): ByteArray {
+        val nick = identity.nickname.toByteArray(Charsets.UTF_8)
+        val pk = identity.ed25519Public
+        val sig = signHello(pk, nick)
+        val body = byteArrayOf(nick.size.toByte()) + nick + pk + sig
+        return PrivatePlaintext.encode(CQ.Content.HELLO, body)
+    }
+
+    private fun signHello(pk: ByteArray, nick: ByteArray): ByteArray {
+        val signer = Ed25519Signer()
+        signer.init(true, Ed25519PrivateKeyParameters(identity.ed25519Private, 0))
+        val msg = pk + nick
+        signer.update(msg, 0, msg.size)
+        return signer.generateSignature()
+    }
+
+    private fun parseHello(body: ByteArray): Triple<String, ByteArray, Boolean>? {
+        if (body.isEmpty()) return null
+        val n = body[0].toInt() and 0xff
+        if (body.size < 1 + n + 32 + 64) return null
+        val nick = body.copyOfRange(1, 1 + n).toString(Charsets.UTF_8)
+        val pk = body.copyOfRange(1 + n, 1 + n + 32)
+        val sig = body.copyOfRange(1 + n + 32, 1 + n + 32 + 64)
+        val ok = try {
+            val verifier = Ed25519Signer()
+            verifier.init(false, Ed25519PublicKeyParameters(pk, 0))
+            val msg = pk + nick.toByteArray(Charsets.UTF_8)
+            verifier.update(msg, 0, msg.size)
+            verifier.verifySignature(sig)
+        } catch (_: Exception) {
+            false
+        }
+        return Triple(nick, pk, ok)
     }
 
     override fun onPacket(data: ByteArray) = handlePacket(data)
 
     override fun onDiscover(tempId: ByteArray) {
+        // Re-bind known sessions if we can match later via Hello; for now upsert peer
+        sessions.keyForTemp(tempId)?.let { sessions.bindTempId(tempId, it) }
         upsertPeer(tempId, null, "附近")
     }
 
     override fun onPeersChanged(count: Int) {
-        // flush waiting media when hotspot peers appear
-        if (count > 0) {
-            for (msg in pendingMedia.filter { it.status == ChatMessage.Status.QUEUED }) {
-                // re-send attempted by UI calling send again; mark for flush
-            }
-        }
+        if (count > 0) flushPendingMedia()
     }
 
     private fun handlePacket(data: ByteArray) {
@@ -216,8 +389,8 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
             CQ.Type.PRIVATE -> handlePrivate(pkt)
             CQ.Type.ACK -> {
                 AckPayload.decode(pkt.payload)?.let {
-                    awaitingAck.remove(it.toHex())
-                    markDelivered(it)
+                    pending.remove(it)
+                    markStatus(it, ChatMessage.Status.DELIVERED)
                 }
             }
         }
@@ -240,20 +413,19 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
         val (pattern, step, body) = HandshakePayload.decode(pkt.payload) ?: return
         if (pattern != 1) return
         val temp = pkt.sender
+        val b = ble ?: return
         when (step) {
             1 -> {
                 val noise = sessions.begin(NoiseXX.Role.RESPONDER, temp)
                 noise.responderRead1(body)
                 val out = noise.responderWrite2()
-                val payload = HandshakePayload.encode(2, out)
-                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload).encode(), false)
+                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, b.tempId, payload = HandshakePayload.encode(2, out)).encode(), false)
             }
             2 -> {
                 val noise = sessions.handshake(temp) ?: return
                 noise.initiatorRead2(body)
                 val out = noise.initiatorWrite3(encodeHello())
-                val payload = HandshakePayload.encode(3, out)
-                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, ble.tempId, payload = payload).encode(), false)
+                routeOut(CQPacket.make(CQ.Type.HANDSHAKE, b.tempId, payload = HandshakePayload.encode(3, out)).encode(), false)
                 sessions.complete(temp)
                 noise.remoteSessionId?.let { upsertPeer(temp, it, "peer") }
             }
@@ -264,21 +436,25 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                 val sid = noise.remoteSessionId ?: return
                 var idFp = sid
                 var nick = "peer"
-                PrivatePlaintext.decode(payload)?.let { (ct, b) ->
+                PrivatePlaintext.decode(payload)?.let { (ct, helloBody) ->
                     if (ct == CQ.Content.HELLO) {
-                        parseHello(b)?.let { (n, edPk) ->
+                        parseHello(helloBody)?.let { (n, edPk, ok) ->
+                            if (!ok) {
+                                Log.w("CQchat", "hello sig invalid")
+                                return
+                            }
                             nick = n
                             idFp = IdentityCrypto.fingerprint(edPk)
-                            if (!idFp.contentEquals(sid)) sessions.rebind(sid, idFp)
+                            if (!idFp.contentEquals(sid)) {
+                                sessions.rebind(sid, idFp)
+                                migratePrivateMap(sid, idFp)
+                            }
                         }
                     }
                 }
                 sessions.updateNickname(idFp, nick)
                 sessions.session(idFp)?.noise?.encrypt(encodeHello())?.let { cipher ->
-                    routeOut(
-                        CQPacket.make(CQ.Type.PRIVATE, ble.tempId, payload = cipher).encode(),
-                        false,
-                    )
+                    routeOut(CQPacket.make(CQ.Type.PRIVATE, b.tempId, payload = cipher).encode(), false)
                 }
                 upsertPeer(temp, idFp, nick)
             }
@@ -286,80 +462,75 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
     }
 
     private fun handlePrivate(pkt: CQPacket) {
-        for ((fp, s) in sessions.all()) {
-            val plain = try {
-                s.noise.decrypt(pkt.payload)
-            } catch (_: Exception) {
-                continue
-            }
-            val (ct, body) = PrivatePlaintext.decode(plain) ?: continue
-            if (pkt.flags and CQ.Flag.NEEDS_ACK != 0) {
-                val ack = CQPacket.make(
-                    CQ.Type.ACK, ble.tempId,
-                    payload = AckPayload.encode(pkt.msgId),
+        val key = sessions.keyForTemp(pkt.sender)
+        if (key == null) {
+            Log.w("CQchat", "private: unknown temp, drop (no trial decrypt)")
+            return
+        }
+        val s = sessions.session(key) ?: return
+        if (s.failed) return
+        val plain = try {
+            s.noise.decrypt(pkt.payload)
+        } catch (e: Exception) {
+            sessions.markFailed(key)
+            Log.w("CQchat", "noise decrypt failed → session reset needed")
+            return
+        }
+        val (ct, body) = PrivatePlaintext.decode(plain) ?: return
+        val fp = s.identityFingerprint ?: key
+        if (pkt.flags and CQ.Flag.NEEDS_ACK != 0) {
+            val b = ble ?: return
+            routeOut(
+                CQPacket.make(CQ.Type.ACK, b.tempId, payload = AckPayload.encode(pkt.msgId)).encode(),
+                false,
+            )
+        }
+        when (ct) {
+            CQ.Content.TEXT -> {
+                appendPrivate(
+                    fp,
+                    ChatMessage(
+                        pkt.msgId, ChatMessage.Kind.TEXT, text = body.toString(Charsets.UTF_8),
+                        fromFingerprint = fp, fromNickname = s.nickname, isPublic = false,
+                        status = ChatMessage.Status.RECEIVED, pathHint = pathFor(fp),
+                    )
                 )
-                routeOut(ack.encode(), false)
+                notifier.message("私聊", body.toString(Charsets.UTF_8))
             }
-            when (ct) {
-                CQ.Content.TEXT -> {
-                    val text = body.toString(Charsets.UTF_8)
-                    appendPrivate(fp, ChatMessage(
-                        pkt.msgId, ChatMessage.Kind.TEXT, text = text, fromFingerprint = fp,
-                        fromNickname = s.nickname, isPublic = false, status = ChatMessage.Status.RECEIVED,
-                    ))
-                    notifier.message("私聊", text)
-                }
-                CQ.Content.IMAGE -> {
-                    val (thumb, data) = MediaContainer.decode(body) ?: return
-                    appendPrivate(fp, ChatMessage(
+            CQ.Content.IMAGE -> {
+                val (thumb, data) = MediaContainer.decode(body) ?: return
+                appendPrivate(
+                    fp,
+                    ChatMessage(
                         pkt.msgId, ChatMessage.Kind.IMAGE, imageJpeg = data, thumbJpeg = thumb,
                         fromFingerprint = fp, fromNickname = s.nickname, isPublic = false,
                         status = ChatMessage.Status.RECEIVED,
-                    ))
-                }
-                CQ.Content.VOICE -> {
-                    val (_, data) = MediaContainer.decode(body) ?: return
-                    appendPrivate(fp, ChatMessage(
+                    )
+                )
+            }
+            CQ.Content.VOICE -> {
+                val (_, data) = MediaContainer.decode(body) ?: return
+                appendPrivate(
+                    fp,
+                    ChatMessage(
                         pkt.msgId, ChatMessage.Kind.VOICE, voiceCqop = data,
                         fromFingerprint = fp, fromNickname = s.nickname, isPublic = false,
                         status = ChatMessage.Status.RECEIVED,
-                    ))
-                }
-                CQ.Content.HELLO -> {
-                    parseHello(body)?.let { (nick, edPk) ->
-                        val idFp = IdentityCrypto.fingerprint(edPk)
-                        if (!idFp.contentEquals(fp)) sessions.rebind(fp, idFp)
-                        sessions.updateNickname(idFp, nick)
-                        upsertPeer(s.remoteTempId, idFp, nick)
-                    }
-                }
+                    )
+                )
             }
-            return
-        }
-        Log.w("CQchat", "private decrypt miss")
-    }
-
-
-    private fun encodeHello(): ByteArray {
-        val nick = identity.nickname.toByteArray(Charsets.UTF_8)
-        val body = byteArrayOf(nick.size.toByte()) + nick + identity.ed25519Public
-        return PrivatePlaintext.encode(CQ.Content.HELLO, body)
-    }
-
-    private fun parseHello(body: ByteArray): Pair<String, ByteArray>? {
-        if (body.isEmpty()) return null
-        val n = body[0].toInt() and 0xff
-        if (body.size < 1 + n + 32) return null
-        val nick = body.copyOfRange(1, 1 + n).toString(Charsets.UTF_8)
-        val pk = body.copyOfRange(1 + n, 1 + n + 32)
-        return nick to pk
-    }
-
-    private fun markDelivered(msgId: ByteArray) {
-        for ((_, list) in privateMessages) {
-            val i = list.indexOfFirst { it.id.contentEquals(msgId) }
-            if (i >= 0) {
-                list[i].status = ChatMessage.Status.DELIVERED
+            CQ.Content.HELLO -> {
+                parseHello(body)?.let { (nick, edPk, ok) ->
+                    if (!ok) return
+                    val idFp = IdentityCrypto.fingerprint(edPk)
+                    if (!idFp.contentEquals(fp)) {
+                        sessions.rebind(fp, idFp)
+                        migratePrivateMap(fp, idFp)
+                    }
+                    sessions.updateNickname(idFp, nick)
+                    sessions.bindTempId(pkt.sender, idFp)
+                    upsertPeer(pkt.sender, idFp, nick)
+                }
             }
         }
     }
@@ -377,12 +548,14 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                 nickname = nickname,
                 lastSeen = System.currentTimeMillis(),
                 verified = (fingerprint ?: p.fingerprint)?.let { identity.isVerified(it) } ?: false,
+                pathHint = pathFor(fingerprint ?: p.fingerprint ?: tempId),
             )
         } else {
             peers.add(
                 Peer(
                     tempId, fingerprint, nickname,
                     verified = fingerprint?.let { identity.isVerified(it) } ?: false,
+                    pathHint = "BLE",
                 )
             )
             fingerprint?.let { fp ->
@@ -393,5 +566,6 @@ class ChatEngine(app: Application) : AndroidViewModel(app), BleMeshListener, Hot
                 }
             }
         }
+        fingerprint?.let { sessions.bindTempId(tempId, it) }
     }
 }

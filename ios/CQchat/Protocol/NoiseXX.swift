@@ -247,7 +247,6 @@ final class CipherState {
     func decrypt(ciphertext: Data, ad: Data) throws -> Data {
         guard ciphertext.count >= 16 else { throw NoiseError.decryptFailed }
         let nonce = Self.noiseNonce(n)
-        n += 1
         let tag = Data(ciphertext.suffix(16))
         let ct = Data(ciphertext.prefix(ciphertext.count - 16))
         let box = try ChaChaPoly.SealedBox(
@@ -256,11 +255,16 @@ final class CipherState {
             tag: tag
         )
         do {
-            return try ChaChaPoly.open(box, using: key, authenticating: ad)
+            let plain = try ChaChaPoly.open(box, using: key, authenticating: ad)
+            n += 1 // only advance after successful auth
+            return plain
         } catch {
             throw NoiseError.decryptFailed
         }
     }
+
+    /// Fatal transport failure: discard session rather than continue with skewed nonce.
+    var nonce: UInt64 { n }
 
     /// Noise AEAD nonce: 4 zero bytes || uint64 little-endian
     static func noiseNonce(_ n: UInt64) -> Data {
