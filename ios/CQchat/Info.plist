@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleDisplayName</key>
+	<string>CQchat</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>CQchat</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>CQchat 用蓝牙在附近发现同伴并收发加密消息，无需网络。</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>CQchat 用蓝牙广播临时标识并收发消息。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>扫描对方公钥指纹二维码以标记已验证。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>同一热点下用 TCP 发送图片和语音。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_cqchat._tcp</string>
+	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>录制短语音消息。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>选择图片压缩后加密发送。</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+</dict>
+</plist>
